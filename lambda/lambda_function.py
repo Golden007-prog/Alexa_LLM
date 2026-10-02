@@ -27,7 +27,7 @@ from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
                                               SpeakDirective)
 from ask_sdk_model.ui import SimpleCard
 
-from coach import feedback, fluency, listening, plan
+from coach import feedback, fluency, listening, plan, srs, vocab
 from coach.content import CUE_CARDS, GERMAN_LESSONS, PART1_TOPICS
 from coach.speech import ACCENTS, brk, esc, german
 
@@ -41,6 +41,9 @@ SKILL_TITLE = "IELTS & German Coach"
 # Conversation modes kept in session attributes
 MENU, P1, P2, P3, LISTEN, GQUIZ = "menu", "p1", "p2", "p3", "listen", "gquiz"
 SETUP_EXAM, SETUP_CUE, RETRY = "setup_exam", "setup_cue", "retry"
+VOCAB = "vocab"
+VOCAB_PER_ROUND = 5
+RELEARN_GAP = 3    # a missed item comes back this many items later
 YES_WORDS = {"yes", "yeah", "yep", "ok", "okay", "sure", "ready", "start",
              "let's go", "go", "yes please", "let's start", "continue",
              "go ahead", "i'm ready"}
@@ -611,6 +614,74 @@ def answer_german(h, text):
 
 
 # ---------------------------------------------------------------------------
+# Spaced review and the vocabulary drill  (docs/LEARNING_DESIGN.md 4.2, 4.5)
+# ---------------------------------------------------------------------------
+def srs_store(h):
+    return persist(h).setdefault("srs", {})
+
+
+def exam_cap(h):
+    return plan.review_cap(local_today(h), persist(h).get("exam_date"))
+
+
+def requeue_if_missed(state, item_id):
+    """Successive relearning: re-ask a missed item later in this session,
+    once, so it ends the session recalled correctly."""
+    if item_id not in state["again"]:
+        state["again"].append(item_id)
+        state["queue"].insert(min(state["i"] + RELEARN_GAP,
+                                  len(state["queue"])), item_id)
+
+
+def asked_before(state):
+    return state["queue"][state["i"]] in state["queue"][:state["i"]]
+
+
+def start_vocab(h):
+    mark_active(h)
+    s = sess(h)
+    queue = srs.pick(srs_store(h), [it["id"] for it in vocab.ITEMS],
+                     local_today(h), VOCAB_PER_ROUND, cap=exam_cap(h))
+    s["mode"] = VOCAB
+    s["vocab"] = {"queue": queue, "i": 0, "score": 0, "again": []}
+    item = vocab.BY_ID[queue[0]]
+    return ask(h, "Vocabulary drill. I'll say a plain sentence. Say it again "
+                  "with a stronger word, the kind that lifts your vocabulary "
+                  "score. %s Number one: %s" % (brk(0.4), esc(item["plain"])),
+               "Make this stronger: " + esc(item["plain"]))
+
+
+def answer_vocab(h, text):
+    s = sess(h)
+    v = s["vocab"]
+    iid = v["queue"][v["i"]]
+    item = vocab.BY_ID[iid]
+    ok, word, nudge = vocab.check(item, text)
+    srs.review(srs_store(h), iid, ok, local_today(h))
+    if ok:
+        v["score"] += 1
+        fb = "Great: %s is band seven vocabulary. %s A band seven answer: %s" % (
+            esc(word), esc(nudge), esc(item["model"]))
+    else:
+        fb = "One option: %s. A band seven answer: %s" % (
+            esc(item["accept"][0]), esc(item["model"]))
+        requeue_if_missed(v, iid)
+    v["i"] += 1
+    if v["i"] < len(v["queue"]):
+        nxt = vocab.BY_ID[v["queue"][v["i"]]]
+        lead = "Let's try this one again: " if asked_before(v) else "Next: "
+        return ask(h, "%s %s %s%s" % (fb, brk(0.5), lead, esc(nxt["plain"])),
+                   "Make this stronger: " + esc(nxt["plain"]))
+    srs.prune(srs_store(h))
+    save_persist(h)
+    s["mode"] = MENU
+    return finish(h, "%s %s You upgraded %d of %d." % (
+        fb, brk(0.5), v["score"], len(v["queue"])),
+        "Say vocabulary drill for more, or menu.",
+        "Say vocabulary drill, or menu.")
+
+
+# ---------------------------------------------------------------------------
 # Today's plan, first-run setup, progress  (docs/LEARNING_DESIGN.md 4.1, 4.8)
 # ---------------------------------------------------------------------------
 ACTIVITIES = {
@@ -621,6 +692,7 @@ ACTIVITIES = {
     "p2rounds": ("Part 2 fluency rounds", 7,
                  lambda h: start_part2(h, rounds=True)),
     "listen": ("a listening call", 4, lambda h: start_listening(h)),
+    "vocab": ("a vocabulary drill", 4, lambda h: start_vocab(h)),
     "german": ("a German lesson", 6, lambda h: start_german(h)),
 }
 # Planned activities not built yet fall back to their nearest neighbour.
@@ -870,6 +942,8 @@ def route_answer(h, text):
         return setup_answer(h, text)
     if mode == RETRY:
         return answer_retry(h, text)
+    if mode == VOCAB:
+        return answer_vocab(h, text)
     if plan_pending(s) and norm in YES_WORDS:
         return start_next_planned(h)
     return ask(h, "Sorry, I didn't get that. " + MENU_SPEECH, MENU_SPEECH)
@@ -905,6 +979,8 @@ def do_next(h):
         return finish_setup(h)
     if mode == RETRY:
         return answer_retry(h, "", skipped=True)
+    if mode == VOCAB:
+        return answer_vocab(h, "")
     if mode == MENU and plan_pending(s):
         return start_next_planned(h)
     if mode == P1:
@@ -969,7 +1045,7 @@ def _fallback(h):
     mode = s.get("mode", MENU)
     if mode == P2:  # keep a long talk flowing even if a chunk wasn't understood
         return answer_part2(h, "")
-    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE, RETRY):
+    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE, RETRY, VOCAB):
         return ask(h, "Sorry, I didn't catch that. " +
                    (s.get("last_reprompt") or ""),
                    s.get("last_reprompt") or MENU_SPEECH)
@@ -991,6 +1067,8 @@ def _help(h):
                    "breakfast at my desk, or say skip.",
         RETRY: "Answer the question again, using the phrase I suggested. "
                "Say skip to move on.",
+        VOCAB: "Say the sentence again with one stronger word instead of the "
+               "plain one. Say next to hear an answer.",
     }
     tip = tips.get(mode, "")
     return ask(h, (tip + " " if tip else "") + MENU_SPEECH + " You can also "
@@ -1080,6 +1158,7 @@ def build_skill_builder():
         ("ListeningDrillIntent", _listening),
         ("GermanLessonIntent", lambda h: start_german(h, slot(h, "lesson"))),
         ("FluencyRoundsIntent", lambda h: start_part2(h, rounds=True)),
+        ("VocabDrillIntent", start_vocab),
         ("TodayIntent", offer_today),
         ("ProgressIntent", progress),
         ("SetExamDateIntent", set_exam_date),

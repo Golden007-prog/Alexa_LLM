@@ -201,6 +201,20 @@
           ]
         },
         {
+          "name": "VocabDrillIntent",
+          "slots": [],
+          "samples": [
+            "vocabulary drill",
+            "vocab drill",
+            "vocabulary practice",
+            "a vocabulary drill",
+            "word upgrade",
+            "upgrade my vocabulary",
+            "band seven words",
+            "vocabulary"
+          ]
+        },
+        {
           "name": "TodayIntent",
           "slots": [],
           "samples": [

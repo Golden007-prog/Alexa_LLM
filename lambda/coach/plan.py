@@ -43,6 +43,16 @@ def days_left(today, exam_iso):
         return None
 
 
+def review_cap(today, exam_iso):
+    """Latest due date for exam material: two days before the exam, so
+    every item gets one more review in time. None when there's no exam
+    date or it is too close for the cap to matter."""
+    left = days_left(today, exam_iso)
+    if left is None or left < 3:
+        return None
+    return date.fromisoformat(exam_iso) - timedelta(2)
+
+
 def record_day(days, today):
     """Add today to the sorted ISO-date log of active days."""
     iso = today.isoformat()

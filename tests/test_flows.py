@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "lambda"))
 
 import lambda_function as lf  # noqa: E402
 from coach import (feedback, fluency, listening, llm, numbers,  # noqa: E402
-                   plan)
+                   plan, srs, vocab)
 from coach.content import CUE_CARDS, GERMAN_LESSONS  # noqa: E402
 from datetime import date  # noqa: E402
 
@@ -913,6 +913,105 @@ def test_listening_stats_rotation_and_weak_spot():
     sim.intent("ListeningDrillIntent")
     assert len(sim.attrs["listen"]["items"][0]["value"]) >= \
         listening.LONG_SURNAME
+
+
+# ---------------------------------------------------------------------------
+# Spaced review (Leitner + successive relearning) and the vocabulary drill
+# ---------------------------------------------------------------------------
+D = date(2026, 10, 4)
+
+
+def test_srs_boxes_and_intervals():
+    store = {}
+    srs.review(store, "V01", True, D)
+    assert store["V01"] == [1, 0, "2026-10-04", 1]
+    assert srs.due_date(store["V01"]) == date(2026, 10, 5)
+    srs.review(store, "V01", True, D + timedelta(1))
+    assert store["V01"][3] == 2
+    assert srs.due_date(store["V01"]) == date(2026, 10, 8)     # +3 days
+    for k in range(5):
+        srs.review(store, "V01", True, D + timedelta(2 + k))
+    assert store["V01"][3] == srs.MAX_BOX
+    srs.review(store, "V01", False, D + timedelta(9))
+    assert store["V01"][1] == 1 and store["V01"][3] == 1
+
+
+def test_srs_due_dates_respect_exam_cap():
+    entry = [3, 0, "2026-10-04", 4]                             # +14 days
+    assert srs.due_date(entry) == date(2026, 10, 18)
+    assert srs.due_date(entry, cap=date(2026, 10, 10)) == date(2026, 10, 10)
+    late = [3, 0, "2026-10-12", 4]                              # after the cap
+    assert srs.due_date(late, cap=date(2026, 10, 10)) == date(2026, 10, 26)
+
+
+def test_review_cap_two_days_before_exam():
+    assert plan.review_cap(D, "2026-10-20") == date(2026, 10, 18)
+    assert plan.review_cap(D, "2026-10-06") is None     # too close to cap
+    assert plan.review_cap(D, None) is None
+
+
+def test_srs_pick_order():
+    store = {"A": [1, 0, "2026-10-01", 1],    # due 10-02: 2 days overdue
+             "B": [0, 3, "2026-10-03", 1],    # due 10-04, many misses
+             "C": [5, 0, "2026-10-03", 1],    # due 10-04, never missed
+             "D": [2, 0, "2026-10-04", 3]}    # not due
+    picks = srs.pick(store, ["A", "B", "C", "D", "E", "F"], D, 4)
+    assert picks == ["A", "B", "C", "E"]
+    assert srs.pick(store, ["D"], D, 3) == []
+    assert srs.pick(store, ["A", "E"], D, 3, new_ok=False) == ["A"]
+    assert srs.due_count(store, ["A", "B", "C", "D"], D) == 3
+
+
+def test_srs_prune_keeps_weak_items():
+    store = {"K%03d" % i: [5, 0, "2026-10-01", 4] for i in range(10)}
+    store["WEAK"] = [0, 5, "2026-09-01", 1]
+    srs.prune(store, cap=5)
+    assert len(store) == 5 and "WEAK" in store
+
+
+def test_vocab_items_are_well_formed():
+    items = vocab.ITEMS
+    assert len(items) >= 40
+    assert len({it["id"] for it in items}) == len(items)
+    assert len({it["topic"] for it in items}) >= 10
+    for it in items:
+        assert len(it["model"].split()) <= 25, it["id"]
+        assert vocab.check(it, it["model"])[0], it["id"]
+        assert not vocab.check(it, it["plain"])[0], it["id"]
+        for word in it["accept"]:
+            assert vocab.check(it, "it was %s" % word)[0], (it["id"], word)
+
+
+def test_vocab_nudges_leftover_intensifier():
+    weather = vocab.BY_ID["V01"]
+    ok, word, nudge = vocab.check(weather, "the weather was very glorious")
+    assert ok and word == "glorious" and "very" in nudge
+    ok, word, nudge = vocab.check(weather, "we had glorious weather")
+    assert ok and nudge == ""
+
+
+def test_vocab_drill_with_relearning():
+    sim = Sim()
+    _, s = sim.intent("VocabDrillIntent")
+    assert "stronger word" in s and sim.attrs["mode"] == "vocab"
+    queue = list(sim.attrs["vocab"]["queue"])
+    assert len(queue) == 5
+    _, s = sim.say("I don't know")                # miss the first item
+    assert "One option" in s
+    assert sim.attrs["vocab"]["queue"].count(queue[0]) == 2
+    seen_again = False
+    for _ in range(5):
+        v = sim.attrs["vocab"]
+        if v["i"] < len(v["queue"]) and v["queue"][v["i"]] == queue[0] \
+                and v["i"] > 0:
+            seen_again = "try this one again" in s
+        item = vocab.BY_ID[v["queue"][v["i"]]]
+        _, s = sim.say("it was %s" % item["accept"][0])
+    assert seen_again
+    assert "You upgraded 5 of 6" in s, s
+    st = lf._LOCAL_STORE["srs"][queue[0]]
+    assert st[0] == 1 and st[1] == 1                 # one miss, one recovery
+    assert lf._LOCAL_STORE["days"] == ["2026-10-04"]
 
 
 if __name__ == "__main__":
