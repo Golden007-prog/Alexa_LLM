@@ -8,17 +8,19 @@ Say: "Alexa, open study coach", then
 Runs as an Alexa-hosted skill (Python 3.8). See README.md.
 """
 
+import functools
 import logging
 import os
 import random
+import time
 from datetime import datetime, timezone
 
 from ask_sdk_core.api_client import DefaultApiClient
 from ask_sdk_core.dispatch_components import (AbstractExceptionHandler,
-                                              AbstractRequestHandler)
+                                              AbstractRequestHandler,
+                                              AbstractRequestInterceptor)
 from ask_sdk_core.skill_builder import CustomSkillBuilder
-from ask_sdk_core.utils import (get_slot_value, is_intent_name,
-                                is_request_type)
+from ask_sdk_core.utils import get_slot, is_intent_name, is_request_type
 from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
                                               SpeakDirective)
 from ask_sdk_model.ui import SimpleCard
@@ -37,6 +39,11 @@ MENU, P1, P2, P3, LISTEN, GQUIZ = "menu", "p1", "p2", "p3", "listen", "gquiz"
 P1_TOPICS_PER_RUN, P1_QUESTIONS_PER_TOPIC = 2, 3
 P2_MAX_SECONDS, P2_MAX_WORDS = 120, 320
 WORDS_PER_SECOND = 2.1          # rough speaking rate for timing Part 2
+
+# Alexa waits about 8 s for a reply. Network work in one request (progressive
+# response, S3 config, LLM) must finish inside this budget, leaving margin.
+REPLY_BUDGET_SECONDS = 7.0
+ALEXA_API_TIMEOUT_SECONDS = 1.5
 
 MENU_SPEECH = ("You can say: mock test, part one, part two, part three, "
                "listening drill, or German lesson.")
@@ -71,6 +78,12 @@ def save_persist(h):
         logger.info("Persistent attributes not saved: %s", exc)
 
 
+def reply_deadline(h):
+    """time.monotonic() value by which this request's reply must be ready."""
+    started = h.attributes_manager.request_attributes.get("started")
+    return (started or time.monotonic()) + REPLY_BUDGET_SECONDS
+
+
 def now_ts(h):
     ts = h.request_envelope.request.timestamp
     if ts is None:
@@ -94,6 +107,15 @@ def tell(h, speech):
     return h.response_builder.speak(speech).set_should_end_session(True).response
 
 
+class TimeoutApiClient(DefaultApiClient):
+    """DefaultApiClient calls `requests` with no timeout, so one stalled
+    Alexa API call could eat the whole reply window."""
+
+    def _resolve_method(self, request):
+        method = super(TimeoutApiClient, self)._resolve_method(request)
+        return functools.partial(method, timeout=ALEXA_API_TIMEOUT_SECONDS)
+
+
 def progressive(h, text):
     """Speak while a slow AI call runs (Progressive Response API).
     Returns True if Alexa accepted it."""
@@ -110,7 +132,7 @@ def progressive(h, text):
 
 def slot(h, name):
     try:
-        return get_slot_value(h, name)
+        return get_slot(h, name).value
     except Exception:
         return None
 
@@ -291,7 +313,8 @@ def give_feedback(h, prefix=""):
                    "Say mock test or part one.")
     sent = progressive(h, prefix + "Let me review your answers. This takes "
                                    "a few seconds.")
-    text, used_ai = feedback.examiner_feedback(transcript)
+    text, used_ai = feedback.examiner_feedback(transcript,
+                                               deadline=reply_deadline(h))
     s["transcript"] = []
     s["mode"] = MENU
     p = persist(h)
@@ -595,6 +618,14 @@ def _stop(h):
     return tell(h, "Good luck with your practice. " + german("Bis bald!"))
 
 
+class StampStart(AbstractRequestInterceptor):
+    """Record when handling began, for reply_deadline()."""
+
+    def process(self, handler_input):
+        handler_input.attributes_manager.request_attributes["started"] = \
+            time.monotonic()
+
+
 class SessionEnded(AbstractRequestHandler):
     def can_handle(self, handler_input):
         return is_request_type("SessionEndedRequest")(handler_input)
@@ -641,15 +672,20 @@ def build_skill_builder():
         try:
             import boto3
             from ask_sdk_dynamodb.adapter import DynamoDbAdapter
+            from botocore.config import Config
+            # Same-region DynamoDB answers in milliseconds; botocore's
+            # 60 s defaults with retries would blow the reply window.
             adapter = DynamoDbAdapter(
                 table_name=table, create_table=False,
                 dynamodb_resource=boto3.resource(
                     "dynamodb",
-                    region_name=os.environ.get("DYNAMODB_PERSISTENCE_REGION")))
+                    region_name=os.environ.get("DYNAMODB_PERSISTENCE_REGION"),
+                    config=Config(connect_timeout=1, read_timeout=1,
+                                  retries={"max_attempts": 0})))
         except Exception as exc:
             logger.warning("DynamoDB persistence disabled: %s", exc)
     sb = CustomSkillBuilder(persistence_adapter=adapter,
-                            api_client=DefaultApiClient())
+                            api_client=TimeoutApiClient())
     sb.add_request_handler(Launch())
     for name, fn in [
         ("MockTestIntent", lambda h: start_part1(h, mock=True)),
@@ -672,6 +708,7 @@ def build_skill_builder():
     ]:
         sb.add_request_handler(Intent(name, fn))
     sb.add_request_handler(SessionEnded())
+    sb.add_global_request_interceptor(StampStart())
     sb.add_exception_handler(Errors())
     return sb
 

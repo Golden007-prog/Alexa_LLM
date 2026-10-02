@@ -1,28 +1,136 @@
 # -*- coding: utf-8 -*-
 """Offline simulation of real Alexa request envelopes through the skill.
 Run:  pip install ask-sdk-core  &&  python tests/test_flows.py
+  or: pytest tests
 """
+import contextlib
 import json
 import os
 import re
+import socket
 import sys
+import threading
+import time
+import urllib.request
 import uuid
 import xml.dom.minidom
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "lambda"))
+ROOT = os.path.join(HERE, "..")
+sys.path.insert(0, os.path.join(ROOT, "lambda"))
 
 import lambda_function as lf  # noqa: E402
 from coach import feedback, listening, llm, numbers  # noqa: E402
 from coach.content import CUE_CARDS, GERMAN_LESSONS  # noqa: E402
 
+# Alexa limits (SSML reference / response JSON reference)
+MAX_SPEECH_CHARS = 8000
+MAX_AUDIO_SECONDS, MAX_REPROMPT_SECONDS = 240, 90
+MAX_RESPONSE_BYTES = 24000
+MAX_CARD_CHARS = 8000
+# Rough Polly pace, deliberately slow so the audio estimate errs long
+EST_WORDS_PER_SECOND = 2.3
+POLLY_VOICES = ["Ivy", "Joanna", "Joey", "Justin", "Kendra", "Kimberly",
+                "Matthew", "Salli", "Nicole", "Russell", "Amy", "Brian",
+                "Emma", "Aditi", "Raveena", "Hans", "Marlene", "Vicki"]
+DIGIT_WORD = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+              "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+
+
+def est_seconds(ssml):
+    """Rough spoken length: break time plus words at a slow Polly pace."""
+    pauses = sum(int(ms) for ms in re.findall(r"<break time='(\d+)ms'/>", ssml))
+    return pauses / 1000.0 + len(text_of(ssml).split()) / EST_WORDS_PER_SECOND
+
+
+def check_ssml(ssml, max_seconds, what):
+    assert len(ssml) <= MAX_SPEECH_CHARS, "%s is %d chars" % (what, len(ssml))
+    try:
+        xml.dom.minidom.parseString(ssml)
+    except Exception as exc:
+        raise AssertionError("%s is not well-formed SSML: %s" % (what, exc))
+    for ms in re.findall(r"<break time='(\d+)ms'/>", ssml):
+        assert int(ms) <= 10000, "%s has a break over 10 s" % what
+    spoken = text_of(ssml)
+    for name in POLLY_VOICES:
+        assert not re.search(r"\b%s\b" % name, spoken), \
+            "%s speaks the voice name %s" % (what, name)
+    secs = est_seconds(ssml)
+    assert secs <= max_seconds, "%s runs about %d s" % (what, secs)
+
+
+def check_response(out):
+    """Every Alexa limit the skill can break, checked on each response."""
+    size = len(json.dumps(out))
+    assert size < MAX_RESPONSE_BYTES, "response too large: %d bytes" % size
+    resp = out["response"]
+    ssml = (resp.get("outputSpeech") or {}).get("ssml", "")
+    if ssml:
+        check_ssml(ssml, MAX_AUDIO_SECONDS, "outputSpeech")
+    reprompt = ((resp.get("reprompt") or {}).get("outputSpeech") or {}) \
+        .get("ssml", "")
+    if reprompt:
+        check_ssml(reprompt, MAX_REPROMPT_SECONDS, "reprompt")
+    card = resp.get("card") or {}
+    card_len = len(card.get("title") or "") + len(card.get("content") or "")
+    assert card_len <= MAX_CARD_CHARS, "card is %d chars" % card_len
+
+
+@contextlib.contextmanager
+def black_hole():
+    """A local port that accepts connections but never answers, standing in
+    for a stalled network dependency."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    try:
+        yield srv.getsockname()[1]
+    finally:
+        srv.close()
+
+
+@contextlib.contextmanager
+def env(**values):
+    old = {k: os.environ.get(k) for k in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def run_within(seconds, fn):
+    """Run fn in a daemon thread; return (finished, elapsed, result)."""
+    box = {}
+
+    def target():
+        try:
+            box["result"] = fn()
+        except BaseException as exc:  # surfaced below
+            box["error"] = exc
+
+    start = time.monotonic()
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if "error" in box:
+        raise box["error"]
+    return not worker.is_alive(), time.monotonic() - start, box.get("result")
+
 
 class Sim:
-    def __init__(self, locale="en-IN"):
+    def __init__(self, locale="en-IN", api_endpoint="http://127.0.0.1:9",
+                 handler=None):
         self.attrs = {}
         self.new = True
         self.locale = locale
+        self.api_endpoint = api_endpoint
+        self.handler = handler or lf.lambda_handler
         self.clock = datetime(2026, 10, 4, 7, 0, 0, tzinfo=timezone.utc)
         self.session_id = "amzn1.echo-api.session." + str(uuid.uuid4())
 
@@ -37,7 +145,7 @@ class Sim:
                 "application": {"applicationId": "amzn1.ask.skill.test"},
                 "user": {"userId": "amzn1.ask.account.TEST"},
                 "device": {"deviceId": "dev", "supportedInterfaces": {}},
-                "apiEndpoint": "http://127.0.0.1:9", "apiAccessToken": "x"}},
+                "apiEndpoint": self.api_endpoint, "apiAccessToken": "x"}},
             "request": request,
         }
 
@@ -46,18 +154,12 @@ class Sim:
         request.setdefault("requestId", "amzn1.echo-api.request." + str(uuid.uuid4()))
         request["timestamp"] = self.clock.strftime("%Y-%m-%dT%H:%M:%SZ")
         request["locale"] = self.locale
-        out = lf.lambda_handler(self._env(request), None)
+        out = self.handler(self._env(request), None)
         self.new = False
         self.attrs = out.get("sessionAttributes") or {}
+        check_response(out)
         resp = out["response"]
-        ssml = (resp.get("outputSpeech") or {}).get("ssml", "")
-        if ssml:
-            xml.dom.minidom.parseString(ssml)  # must be well-formed XML
-            for m in re.finditer(r"<break time='(\d+)ms'/>", ssml):
-                assert int(m.group(1)) <= 10000, "break too long"
-        size = len(json.dumps(out))
-        assert size < 24000, "response too large: %d bytes" % size
-        return resp, ssml
+        return resp, (resp.get("outputSpeech") or {}).get("ssml", "")
 
     def launch(self):
         return self.send({"type": "LaunchRequest"})
@@ -93,7 +195,7 @@ def test_listening_checks():
     assert listening.check(sur, " ".join(sur["value"].upper()))[0]
     assert listening.check(sur, sur["value"].lower())[0]
     assert not listening.check(sur, "smith")[0]
-    spoken = " ".join(numbers._DIGIT_WORDS_REV[c] for c in phone["value"])
+    spoken = " ".join(DIGIT_WORD[c] for c in phone["value"])
     assert listening.check(phone, spoken)[0]
     assert listening.check(day, "the %dth of %s" % (day["value"], day["month"]))[0]
     assert listening.check(num, "%d %s" % (num["value"], num["unit"]))[0]
@@ -143,7 +245,7 @@ def test_ai_feedback_path():
     llm._cache.clear()
     llm._cache.update({"provider": "gemini", "api_key": "k", "model": "m",
                        "timeout_seconds": 1.0, "gemini_thinking_level": ""})
-    llm.generate = lambda system, prompt, max_tokens=700: (
+    llm.generate = lambda system, prompt, max_tokens=700, deadline=None: (
         "**Fluency** six to six point five. You said & repeated *good* a lot.")
     try:
         resp, s = sim.intent("FeedbackIntent")
@@ -171,7 +273,7 @@ def test_listening_flow():
     sim = Sim()
     sim.launch()
     _, s = sim.intent("ListeningDrillIntent", accent="aussie")
-    assert "Australian" in s and "Nicole" in s or "Russell" in s
+    assert "Australian" in s and ("Nicole" in s or "Russell" in s)
     items = sim.attrs["listen"]["items"]
     _, s = sim.intent("AMAZON.RepeatIntent")
     assert "only hear it once" in s
@@ -268,10 +370,146 @@ def test_gemini_request_shape():
     assert captured["headers"].get("X-goog-api-key") == "KEY"
 
 
+def test_response_guard_rejects_bad_output():
+    def out(ssml, reprompt="<speak>Say menu.</speak>", card=None):
+        resp = {"outputSpeech": {"type": "SSML", "ssml": ssml},
+                "reprompt": {"outputSpeech": {"type": "SSML",
+                                              "ssml": reprompt}}}
+        if card:
+            resp["card"] = card
+        return {"version": "1.0", "response": resp}
+
+    check_response(out("<speak>Hello.</speak>"))
+    bad = [
+        out("<speak>%s</speak>" % ("word " * 1700)),               # > 8000 chars
+        out("<speak>Hi.</speak>", reprompt="<speak><break></speak>"),
+        out("<speak>Hi.</speak>", reprompt="<speak>%s</speak>"
+            % ("<break time='10000ms'/>" * 10)),                   # > 90 s
+        out("<speak>%s</speak>" % ("<break time='10000ms'/>" * 25)),  # > 240 s
+        out("<speak><break time='12000ms'/></speak>"),
+        out("<speak>I am Vicki, your coach.</speak>"),
+        out("<speak>Hi.</speak>", card={"type": "Simple", "title": "t",
+                                       "content": "x" * 8001}),
+    ]
+    for i, o in enumerate(bad):
+        try:
+            check_response(o)
+        except AssertionError:
+            continue
+        raise AssertionError("bad response %d slipped through" % i)
+
+
+def test_no_deprecated_sdk_calls_in_skill_code():
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        sim = Sim()
+        sim.launch()
+        sim.intent("ListeningDrillIntent", accent="british")
+        sim.say("thornton")
+    ours = [w for w in caught if issubclass(w.category, DeprecationWarning)
+            and os.sep + "lambda" + os.sep in os.path.normpath(w.filename)]
+    assert not ours, [str(w.message)[:80] for w in ours]
+
+
+def _model(locale):
+    path = os.path.join(ROOT, "skill-package", "interactionModels", "custom",
+                        locale + ".json")
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_interaction_models_match_handlers():
+    with open(os.path.join(ROOT, "skill-package", "skill.json"),
+              encoding="utf-8") as fh:
+        manifest = json.load(fh)["manifest"]
+    locales = sorted(manifest["publishingInformation"]["locales"])
+    assert "en-IN" in locales
+    models = {loc: _model(loc) for loc in locales}
+    # one shared model: any locale-specific edit must be made on purpose
+    for loc in locales:
+        assert models[loc] == models["en-IN"], "%s differs from en-IN" % loc
+    lm = models["en-IN"]["interactionModel"]["languageModel"]
+    assert lm["invocationName"] == "study coach"
+    declared = {i["name"] for i in lm["intents"]}
+    chains = lf.sb.runtime_configuration_builder.request_handler_chains
+    handled = {c.request_handler.name for c in chains
+               if hasattr(c.request_handler, "name")}
+    assert declared - handled == set(), declared - handled
+    assert handled - declared == set(), handled - declared
+    slot_types = {t["name"] for t in lm.get("types", [])}
+    for intent in lm["intents"]:
+        for s in intent.get("slots", []):
+            assert s["type"].startswith("AMAZON.") or s["type"] in slot_types
+
+
+def test_s3_config_read_gives_up_quickly():
+    llm._cache.clear()
+    with black_hole() as port, env(
+            S3_PERSISTENCE_BUCKET="coach-bucket",
+            AWS_ENDPOINT_URL_S3="http://127.0.0.1:%d" % port,
+            AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test",
+            AWS_DEFAULT_REGION="us-east-1"):
+        done, secs, cfg = run_within(6, llm._from_s3)
+    assert done, "S3 config read still blocked after 6 s"
+    assert secs < 3, secs
+    assert cfg == {}
+
+
+def test_dynamodb_stall_does_not_hang_launch():
+    with black_hole() as port, env(
+            DYNAMODB_PERSISTENCE_TABLE_NAME="coach-table",
+            DYNAMODB_PERSISTENCE_REGION="us-east-1",
+            AWS_ENDPOINT_URL_DYNAMODB="http://127.0.0.1:%d" % port,
+            AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test"):
+        sim = Sim(handler=lf.build_skill_builder().lambda_handler())
+        done, secs, result = run_within(10, sim.launch)
+    assert done, "launch still blocked after 10 s"
+    assert secs < 4.5, "launch took %.1f s" % secs
+    assert "mock test" in result[1]
+
+
+def test_llm_timeout_capped_at_5_5_seconds():
+    llm._cache.clear()
+    with env(LLM_PROVIDER="gemini", LLM_API_KEY="k", LLM_TIMEOUT_SECONDS="30"):
+        try:
+            assert llm.get_config()["timeout_seconds"] == 5.5
+        finally:
+            llm._cache.clear()
+
+
+def test_feedback_fits_alexa_window_when_network_hangs():
+    """Progressive response, S3 config and the LLM all stall. The reply
+    must still land inside Alexa's ~8 s window, with rule-based tips."""
+    llm._cache.clear()
+    real_urlopen = llm.urllib.request.urlopen
+    with black_hole() as port, env(
+            S3_PERSISTENCE_BUCKET="coach-bucket",
+            AWS_ENDPOINT_URL_S3="http://127.0.0.1:%d" % port,
+            AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test",
+            AWS_DEFAULT_REGION="us-east-1",
+            LLM_PROVIDER="gemini", LLM_API_KEY="k"):
+        sim = Sim(api_endpoint="https://127.0.0.1:%d" % port)
+        sim.launch()
+        sim.intent("PartOneIntent")
+        sim.say("My hometown is Kolkata. It is famous for its food.")
+        llm.urllib.request.urlopen = lambda req, timeout: real_urlopen(
+            urllib.request.Request("https://127.0.0.1:%d/" % port,
+                                   data=req.data, method="POST"),
+            timeout=timeout)
+        try:
+            done, secs, result = run_within(
+                12, lambda: sim.intent("FeedbackIntent"))
+        finally:
+            llm.urllib.request.urlopen = real_urlopen
+            llm._cache.clear()
+    assert done, "feedback still blocked after 12 s"
+    assert secs < 7.5, "feedback took %.1f s" % secs
+    _, s = result
+    assert "Aim for two or three sentences" in s, s
+
+
 if __name__ == "__main__":
-    numbers._DIGIT_WORDS_REV = {v: k for k, v in numbers._DIGIT_WORDS.items()
-                                if k in ("zero", "one", "two", "three", "four",
-                                         "five", "six", "seven", "eight", "nine")}
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()

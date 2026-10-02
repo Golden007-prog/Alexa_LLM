@@ -14,10 +14,14 @@ Never commit a real key to a public repository.
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
 logger = logging.getLogger(__name__)
+
+MAX_TIMEOUT_SECONDS = 5.5  # hard cap, whatever the config says
+MIN_USEFUL_SECONDS = 1.0   # less time than this left: skip the call
 
 DEFAULTS = {
     "provider": "none",             # "gemini", "anthropic" or "none"
@@ -40,8 +44,12 @@ def _from_s3():
         return {}
     try:
         import boto3  # available in the Lambda runtime
-        obj = boto3.client("s3").get_object(Bucket=bucket,
-                                            Key="Media/llm_config.json")
+        from botocore.config import Config
+        # botocore defaults are 60 s per attempt with retries: far past
+        # Alexa's 8 s reply window.
+        client = boto3.client("s3", config=Config(
+            connect_timeout=1, read_timeout=1, retries={"max_attempts": 0}))
+        obj = client.get_object(Bucket=bucket, Key="Media/llm_config.json")
         return json.loads(obj["Body"].read().decode("utf-8"))
     except Exception as exc:  # missing file is normal
         logger.info("No S3 LLM config: %s", exc)
@@ -79,7 +87,8 @@ def get_config():
         if v:
             cfg[k] = v
     cfg["provider"] = str(cfg["provider"]).lower().strip()
-    cfg["timeout_seconds"] = float(cfg["timeout_seconds"])
+    cfg["timeout_seconds"] = min(float(cfg["timeout_seconds"]),
+                                 MAX_TIMEOUT_SECONDS)
     if not cfg["model"]:
         cfg["model"] = DEFAULT_MODELS.get(cfg["provider"], "")
     _cache.update(cfg)
@@ -98,7 +107,7 @@ def _post(url, headers, body, timeout):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _gemini(cfg, system, prompt, max_tokens):
+def _gemini(cfg, system, prompt, max_tokens, timeout):
     url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
            % cfg["model"])
     gen = {"maxOutputTokens": max_tokens, "temperature": 0.4}
@@ -111,33 +120,40 @@ def _gemini(cfg, system, prompt, max_tokens):
     }
     data = _post(url, {"Content-Type": "application/json",
                        "x-goog-api-key": cfg["api_key"]},
-                 body, cfg["timeout_seconds"])
+                 body, timeout)
     parts = data["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
-def _anthropic(cfg, system, prompt, max_tokens):
+def _anthropic(cfg, system, prompt, max_tokens, timeout):
     body = {"model": cfg["model"], "max_tokens": max_tokens, "system": system,
             "messages": [{"role": "user", "content": prompt}]}
     data = _post("https://api.anthropic.com/v1/messages",
                  {"Content-Type": "application/json",
                   "x-api-key": cfg["api_key"],
                   "anthropic-version": "2023-06-01"},
-                 body, cfg["timeout_seconds"])
+                 body, timeout)
     return "".join(b.get("text", "") for b in data.get("content", [])
                    if b.get("type") == "text")
 
 
-def generate(system, prompt, max_tokens=700):
-    """Return model text, or None on any failure or timeout."""
+def generate(system, prompt, max_tokens=700, deadline=None):
+    """Return model text, or None on any failure or timeout.
+    deadline: time.monotonic() value the reply must be ready by."""
     if not enabled():
         return None
     cfg = get_config()
+    timeout = cfg["timeout_seconds"]
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+    if timeout < MIN_USEFUL_SECONDS:
+        logger.warning("LLM skipped: only %.1f s left", timeout)
+        return None
     try:
         if cfg["provider"] == "gemini":
-            text = _gemini(cfg, system, prompt, max_tokens)
+            text = _gemini(cfg, system, prompt, max_tokens, timeout)
         else:
-            text = _anthropic(cfg, system, prompt, max_tokens)
+            text = _anthropic(cfg, system, prompt, max_tokens, timeout)
         return text.strip() or None
     except urllib.error.HTTPError as exc:
         try:

@@ -99,12 +99,12 @@ def rule_based(transcript):
     return tips
 
 
-def examiner_feedback(transcript):
-    """Return (spoken_text, used_ai)."""
+def examiner_feedback(transcript, deadline=None):
+    """Return (spoken_text, used_ai). deadline: see llm.generate."""
     if llm.enabled():
         prompt = ("Here is the transcript of my IELTS Speaking practice. "
                   "Give me feedback.\n\n" + format_transcript(transcript))
-        text = llm.generate(SYSTEM_PROMPT, prompt)
+        text = llm.generate(SYSTEM_PROMPT, prompt, deadline=deadline)
         if text:
             return clean_llm_text(text), True
     tips = rule_based(transcript)[:3]
