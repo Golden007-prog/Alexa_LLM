@@ -21,8 +21,9 @@ ROOT = os.path.join(HERE, "..")
 sys.path.insert(0, os.path.join(ROOT, "lambda"))
 
 import lambda_function as lf  # noqa: E402
-from coach import feedback, listening, llm, numbers  # noqa: E402
+from coach import feedback, listening, llm, numbers, plan  # noqa: E402
 from coach.content import CUE_CARDS, GERMAN_LESSONS  # noqa: E402
+from datetime import date  # noqa: E402
 
 # Alexa limits (SSML reference / response JSON reference)
 MAX_SPEECH_CHARS = 8000
@@ -124,8 +125,15 @@ def run_within(seconds, fn):
 
 
 class Sim:
+    """One simulated user. Starts from a returning user's saved state
+    (setup done) unless fresh=True; store= presets saved attributes."""
+
     def __init__(self, locale="en-IN", api_endpoint="http://127.0.0.1:9",
-                 handler=None):
+                 handler=None, fresh=False, store=None):
+        lf._LOCAL_STORE.clear()
+        if not fresh:
+            lf._LOCAL_STORE.update({"visits": 1, "setup_done": True})
+        lf._LOCAL_STORE.update(store or {})
         self.attrs = {}
         self.new = True
         self.locale = locale
@@ -507,6 +515,180 @@ def test_feedback_fits_alexa_window_when_network_hangs():
     assert secs < 7.5, "feedback took %.1f s" % secs
     _, s = result
     assert "Aim for two or three sentences" in s, s
+
+
+# ---------------------------------------------------------------------------
+# Daily plan, countdown, streak, progress, one-shot entry points
+# ---------------------------------------------------------------------------
+def test_local_date_uses_ist_for_en_in():
+    late = datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)   # 01:30 IST
+    assert plan.local_date(late, "en-IN") == date(2026, 10, 4)
+    assert plan.local_date(late, "en-US") == date(2026, 10, 3)
+
+
+def test_parse_exam_date():
+    today = date(2026, 10, 4)
+    want = date(2026, 10, 28)
+    for text in ("october twenty eighth", "the twenty eighth of october",
+                 "28th october", "October 28", "2026-10-28",
+                 "my exam is on the 28th of October"):
+        assert plan.parse_exam_date(text, today) == want, text
+    assert plan.parse_exam_date("in three weeks", today) == date(2026, 10, 25)
+    assert plan.parse_exam_date("in 10 days", today) == date(2026, 10, 14)
+    assert plan.parse_exam_date("march fifth", today) == date(2027, 3, 5)
+    assert plan.parse_exam_date("the first of october", today) == \
+        date(2027, 10, 1)
+    for text in ("i don't know", "", "2026-W43", "february thirtieth"):
+        assert plan.parse_exam_date(text, today) is None, text
+
+
+def test_streak_and_day_log():
+    days = []
+    for d in ("2026-10-01", "2026-10-02", "2026-10-03", "2026-10-03"):
+        days = plan.record_day(days, date.fromisoformat(d))
+    assert days == ["2026-10-01", "2026-10-02", "2026-10-03"]
+    assert plan.streak(days, date(2026, 10, 3)) == 3
+    assert plan.streak(days, date(2026, 10, 4)) == 3   # not practised yet today
+    assert plan.streak(days, date(2026, 10, 5)) == 0
+    long_log = []
+    for i in range(80):
+        long_log = plan.record_day(long_log, date(2026, 1, 1) + timedelta(i))
+    assert len(long_log) == plan.MAX_DAYS_LOGGED
+
+
+def test_todays_plan_follows_countdown():
+    far = [plan.todays_plan(20, d) for d in range(4)]
+    assert ["mock" in p for p in far].count(True) == 1
+    assert all(p[-1] == "german" for p in far)
+    near = [plan.todays_plan(10, d) for d in range(2)]
+    assert "mock" in near[0] and "listen" in near[1]
+    assert "mock" not in plan.todays_plan(2, 0)
+    assert plan.todays_plan(0, 0) == ["p1"]
+    assert set(plan.todays_plan(-1, 0)) <= {"german", "greview"}
+    assert plan.todays_plan(None, 1) == plan.todays_plan(30, 1)
+
+
+def test_first_launch_runs_setup():
+    sim = Sim(fresh=True)
+    _, s = sim.launch()
+    assert "when is your IELTS exam" in s
+    _, s = sim.say("october twenty eighth")
+    assert "24 days" in s and "When and where" in s
+    _, s = sim.say("after breakfast at my desk")
+    assert "after breakfast at my desk" in s and "Today:" in s
+    assert lf._LOCAL_STORE["exam_date"] == "2026-10-28"
+    assert lf._LOCAL_STORE["setup_done"] is True
+    _, s = sim.launch()
+    assert "when is your IELTS exam" not in s
+
+
+def test_declined_plan_does_not_hijack_other_activities():
+    sim = Sim()
+    sim.launch()                                   # plan offered, not taken
+    _, s = sim.intent("ListeningDrillIntent")
+    for _ in sim.attrs["listen"]["items"]:
+        _, s = sim.say("I don't know")
+    assert "Next on today's plan" not in s and "Say listening drill" in s
+
+
+def test_setup_can_be_skipped():
+    sim = Sim(fresh=True)
+    sim.launch()
+    _, s = sim.say("hmm no idea")
+    assert "didn't catch a date" in s
+    sim.intent("AMAZON.NextIntent")
+    _, s = sim.say("skip")
+    assert "Today:" in s
+    assert "exam_date" not in lf._LOCAL_STORE
+
+
+def test_set_exam_date_any_time():
+    sim = Sim()
+    sim.launch()
+    _, s = sim.intent("SetExamDateIntent", date="2026-11-02")
+    assert "29 days" in s
+    assert lf._LOCAL_STORE["exam_date"] == "2026-11-02"
+    _, s = sim.intent("SetExamDateIntent", date="2026-W45")
+    assert "didn't catch a date" in s
+
+
+def test_launch_offers_plan_and_chains_activities():
+    sim = Sim(store={"exam_date": "2026-10-06"})       # 2 days left
+    _, s = sim.launch()
+    assert "2 days to your exam" in s and "Today:" in s and "mock test" in s
+    items = sim.attrs["plan"]["items"]
+    assert items[0] == "listen"
+    _, s = sim.say("yes")
+    assert sim.attrs["mode"] == "listen" and "Listening drill" in s
+    for _ in sim.attrs["listen"]["items"]:
+        _, s = sim.say("I don't know")
+    assert "Next on today's plan" in s
+    sim.intent("AMAZON.NextIntent")
+    assert sim.attrs["plan"]["i"] == 2
+
+
+def test_today_intent_and_plan_done():
+    sim = Sim(store={"exam_date": "2026-10-04"})       # exam day
+    _, s = sim.intent("TodayIntent")
+    assert "exam is today" in s and sim.attrs["plan"]["items"] == ["p1"]
+    sim.say("ok")
+    assert sim.attrs["mode"] == "p1"
+    for _ in range(6):
+        _, s = sim.say("I live in Bengaluru because my job is here")
+    for _ in range(3):                                  # retry or done
+        if "today's plan done" in s:
+            break
+        _, s = sim.intent("AMAZON.NextIntent")
+    assert "today's plan done" in s, s
+
+
+def test_progress_report():
+    sim = Sim(store={
+        "exam_date": "2026-10-16", "mocks": 2, "german_next": 5,
+        "days": ["2026-10-02", "2026-10-03", "2026-10-04"],
+        "history": [{"date": "2026-10-03", "ai": False,
+                     "feedback": "Use more linking phrases. Second line."}]})
+    resp, s = sim.intent("ProgressIntent")
+    for want in ("12 days to your exam", "3-day streak", "2 mock tests",
+                 "German lesson 6", "Use more linking phrases"):
+        assert want in s, (want, s)
+    assert "Second line" not in s
+    assert resp["card"]["title"] == "Your progress"
+
+
+def test_progress_report_for_a_new_user():
+    sim = Sim(fresh=True)
+    _, s = sim.intent("ProgressIntent")
+    assert "first session" in s
+
+
+def test_activity_marks_today_once():
+    sim = Sim()
+    sim.launch()
+    sim.intent("ListeningDrillIntent")
+    sim.intent("GermanLessonIntent")
+    assert lf._LOCAL_STORE["days"] == ["2026-10-04"]
+
+
+def test_one_shot_entry_points():
+    for intent, slots, want in [
+            ("GermanLessonIntent", {}, "German lesson 1 of 20"),
+            ("MockTestIntent", {}, "Part 1"),
+            ("ListeningDrillIntent", {"accent": "british"}, "Listening drill"),
+            ("TodayIntent", {}, "Today:"),
+            ("ProgressIntent", {}, "streak")]:
+        sim = Sim()
+        assert sim.new
+        _, s = sim.intent(intent, **slots)
+        assert want in s, (intent, s)
+    lm = _model("en-IN")["interactionModel"]["languageModel"]
+    samples = {i["name"]: i["samples"] for i in lm["intents"]}
+    assert "a german lesson" in samples["GermanLessonIntent"]
+    assert "a mock test" in samples["MockTestIntent"]
+    assert "a listening drill" in samples["ListeningDrillIntent"]
+    for intent_samples in samples.values():
+        for sample in intent_samples:
+            assert not sample.startswith(("ask ", "for ", "to ")), sample
 
 
 if __name__ == "__main__":

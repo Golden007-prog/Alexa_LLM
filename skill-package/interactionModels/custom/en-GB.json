@@ -60,7 +60,10 @@
             "speaking test",
             "start the speaking test",
             "i want a mock test",
-            "practice test"
+            "practice test",
+            "a mock test",
+            "a full mock test",
+            "a speaking mock test"
           ]
         },
         {
@@ -152,7 +155,11 @@
             "listening drill {accent}",
             "{accent} listening drill",
             "listening drill with an {accent} accent",
-            "listening practice {accent}"
+            "listening practice {accent}",
+            "a listening drill",
+            "a listening test",
+            "a listening drill with an {accent} accent",
+            "an {accent} listening drill"
           ]
         },
         {
@@ -173,7 +180,61 @@
             "german lesson {lesson}",
             "lesson {lesson}",
             "german lesson number {lesson}",
-            "repeat german lesson {lesson}"
+            "repeat german lesson {lesson}",
+            "a german lesson",
+            "my german lesson",
+            "my next german lesson"
+          ]
+        },
+        {
+          "name": "TodayIntent",
+          "slots": [],
+          "samples": [
+            "today's plan",
+            "today's session",
+            "today's practice",
+            "my plan for today",
+            "what should i do today",
+            "what's on today",
+            "start today's session",
+            "start today's plan",
+            "my daily practice",
+            "daily practice",
+            "a study session",
+            "my study session"
+          ]
+        },
+        {
+          "name": "ProgressIntent",
+          "slots": [],
+          "samples": [
+            "how am i doing",
+            "my progress",
+            "progress report",
+            "check my progress",
+            "show my progress",
+            "how is my progress",
+            "what's my streak",
+            "my streak"
+          ]
+        },
+        {
+          "name": "SetExamDateIntent",
+          "slots": [
+            {
+              "name": "date",
+              "type": "AMAZON.DATE"
+            }
+          ],
+          "samples": [
+            "my exam is on {date}",
+            "my exam is {date}",
+            "my ielts exam is on {date}",
+            "the exam is on {date}",
+            "exam date {date}",
+            "set my exam date to {date}",
+            "change my exam date to {date}",
+            "my test date is {date}"
           ]
         },
         {

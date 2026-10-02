@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """IELTS & German Coach - an Alexa custom skill for an Echo Dot.
 
-Say: "Alexa, open study coach", then
+Say: "Alexa, open study coach" (today's plan), then
   "mock test" | "part one" | "part two" | "part three" | "feedback"
   "listening drill" | "listening drill british" | "German lesson" | "German lesson 5"
+  "how am I doing" | "my exam is on <date>"
 
 Runs as an Alexa-hosted skill (Python 3.8). See README.md.
 """
@@ -12,6 +13,7 @@ import functools
 import logging
 import os
 import random
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -25,17 +27,23 @@ from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
                                               SpeakDirective)
 from ask_sdk_model.ui import SimpleCard
 
-from coach import feedback, listening
+from coach import feedback, listening, plan
 from coach.content import CUE_CARDS, GERMAN_LESSONS, PART1_TOPICS
 from coach.speech import ACCENTS, brk, esc, german
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+# Alexa-hosted pins the runtime; log it so CloudWatch shows what really runs.
+logger.info("Cold start on Python %s", sys.version.split()[0])
 
 SKILL_TITLE = "IELTS & German Coach"
 
 # Conversation modes kept in session attributes
 MENU, P1, P2, P3, LISTEN, GQUIZ = "menu", "p1", "p2", "p3", "listen", "gquiz"
+SETUP_EXAM, SETUP_CUE = "setup_exam", "setup_cue"
+YES_WORDS = {"yes", "yeah", "yep", "ok", "okay", "sure", "ready", "start",
+             "let's go", "go", "yes please", "let's start", "continue",
+             "go ahead", "i'm ready"}
 P1_TOPICS_PER_RUN, P1_QUESTIONS_PER_TOPIC = 2, 3
 P2_MAX_SECONDS, P2_MAX_WORDS = 120, 320
 WORDS_PER_SECOND = 2.1          # rough speaking rate for timing Part 2
@@ -84,13 +92,31 @@ def reply_deadline(h):
     return (started or time.monotonic()) + REPLY_BUDGET_SECONDS
 
 
-def now_ts(h):
+def request_time(h):
     ts = h.request_envelope.request.timestamp
     if ts is None:
-        return datetime.now(timezone.utc).timestamp()
+        return datetime.now(timezone.utc)
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts.timestamp()
+    return ts
+
+
+def now_ts(h):
+    return request_time(h).timestamp()
+
+
+def local_today(h):
+    return plan.local_date(request_time(h), h.request_envelope.request.locale)
+
+
+def mark_active(h):
+    """Log today as a practice day (for the streak); saved once per day."""
+    p = persist(h)
+    days = p.get("days") or []
+    updated = plan.record_day(days, local_today(h))
+    if updated != days:
+        p["days"] = updated
+        save_persist(h)
 
 
 def ask(h, speech, reprompt, card_title=None, card_text=None):
@@ -154,6 +180,7 @@ def p1_question(s):
 
 
 def start_part1(h, mock):
+    mark_active(h)
     s = sess(h)
     s["mock"] = mock
     s["mode"] = P1
@@ -185,6 +212,9 @@ def answer_part1(h, text):
         if s.get("mock"):
             return start_part2(h, prefix="Thank you. That's the end of Part 1. ")
         s["mode"] = MENU
+        if plan_active(s):   # part of today's plan: review right away
+            return give_feedback(h, prefix="Thank you. That's the end of "
+                                           "Part 1. ")
         return ask(h, "Thank you. That's the end of Part 1. Say feedback to "
                       "hear how you did, or part two to continue.",
                    "Say feedback, or part two.")
@@ -203,6 +233,7 @@ def cue_card_text(card):
 
 
 def start_part2(h, prefix=""):
+    mark_active(h)
     s = sess(h)
     used = s.setdefault("cards_used", [])
     choices = [i for i in range(len(CUE_CARDS)) if i not in used] or \
@@ -262,12 +293,13 @@ def answer_part2(h, text, finished=False):
     if s.get("mock"):
         return start_part3(h, prefix=msg)
     s["mode"] = MENU
-    return ask(h, msg + "Say part three for discussion questions on this "
-                        "topic, or feedback.",
-               "Say part three, or feedback.")
+    return finish(h, msg, "Say part three for discussion questions on this "
+                          "topic, or feedback.",
+                  "Say part three, or feedback.")
 
 
 def start_part3(h, prefix=""):
+    mark_active(h)
     s = sess(h)
     idx = s.get("last_card")
     intro = "Part 3. Let's discuss some more general questions linked to "
@@ -299,9 +331,9 @@ def answer_part3(h, text):
         persist(h)["mocks"] = persist(h).get("mocks", 0) + 1
         return give_feedback(h, prefix="Thank you. That is the end of the "
                                        "speaking test. ")
-    return ask(h, "Thank you. That's the end of Part 3. Say feedback, or "
-                  "mock test for a full test.",
-               "Say feedback, or mock test.")
+    return finish(h, "Thank you. That's the end of Part 3.",
+                  "Say feedback, or mock test for a full test.",
+                  "Say feedback, or mock test.")
 
 
 def give_feedback(h, prefix=""):
@@ -319,20 +351,20 @@ def give_feedback(h, prefix=""):
     s["mode"] = MENU
     p = persist(h)
     hist = p.setdefault("history", [])
-    hist.append({"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    hist.append({"date": local_today(h).isoformat(),
                  "ai": used_ai, "feedback": text[:600]})
     del hist[:-10]
     save_persist(h)
-    speech = ("" if sent else prefix) + esc(text) + brk(0.6) + \
-        "Say repeat to hear that again, or mock test to go again."
-    return ask(h, speech, "Say repeat, or mock test.",
-               "Speaking feedback", text)
+    return finish(h, ("" if sent else prefix) + esc(text) + brk(0.6),
+                  "Say repeat to hear that again, or mock test to go again.",
+                  "Say repeat, or mock test.", "Speaking feedback", text)
 
 
 # ---------------------------------------------------------------------------
 # IELTS Listening drill
 # ---------------------------------------------------------------------------
 def start_listening(h, accent=None):
+    mark_active(h)
     s = sess(h)
     drill = listening.make_drill(accent)
     s["mode"] = LISTEN
@@ -362,10 +394,11 @@ def answer_listening(h, text):
                    esc(q))
     s["mode"] = MENU
     total = len(L["items"])
-    return ask(h, "%s %s You scored %d out of %d. Say listening drill for "
-                  "another call, or name an accent, like listening drill "
-                  "Australian." % (fb, brk(0.4), L["score"], total),
-               "Say listening drill, or German lesson.")
+    return finish(h, "%s %s You scored %d out of %d." % (fb, brk(0.4),
+                                                         L["score"], total),
+                  "Say listening drill for another call, or name an accent, "
+                  "like listening drill Australian.",
+                  "Say listening drill, or German lesson.")
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +414,7 @@ def lesson_phrases(idx):
 
 
 def start_german(h, number=None):
+    mark_active(h)
     s = sess(h)
     p = persist(h)
     nxt = int(p.get("german_next", 0))
@@ -460,9 +494,214 @@ def answer_german(h, text):
         end = ("You scored %d out of %d. Let's repeat this lesson next time to "
                "lock it in." % (score, total))
     save_persist(h)
-    return ask(h, fb + " " + end + " What next? Mock test, listening drill, "
-                                  "or menu?",
-               "Say mock test, listening drill, or menu.")
+    return finish(h, fb + " " + end,
+                  "What next? Mock test, listening drill, or menu?",
+                  "Say mock test, listening drill, or menu.")
+
+
+# ---------------------------------------------------------------------------
+# Today's plan, first-run setup, progress  (docs/LEARNING_DESIGN.md 4.1, 4.8)
+# ---------------------------------------------------------------------------
+ACTIVITIES = {
+    # id: (spoken label, rough minutes, start function)
+    "mock": ("a full mock test", 15, lambda h: start_part1(h, mock=True)),
+    "p1": ("Part 1 questions with feedback", 5,
+           lambda h: start_part1(h, mock=False)),
+    "p2": ("a Part 2 talk", 5, lambda h: _part2(h)),
+    "listen": ("a listening call", 4, lambda h: start_listening(h)),
+    "german": ("a German lesson", 6, lambda h: start_german(h)),
+}
+# Planned activities not built yet fall back to their nearest neighbour.
+PLAN_FALLBACK = {"p2rounds": "p2", "greview": "german"}
+
+
+def resolve_plan(ids):
+    out = []
+    for a in ids:
+        a = a if a in ACTIVITIES else PLAN_FALLBACK.get(a)
+        if a and a not in out:
+            out.append(a)
+    return out
+
+
+def plan_pending(s):
+    """The next activity id in today's plan (offered or accepted), or None."""
+    pl = s.get("plan")
+    if pl and pl["i"] < len(pl["items"]):
+        return pl["items"][pl["i"]]
+    return None
+
+
+def plan_active(s):
+    """True once the user has accepted today's plan. An offered plan the
+    user ignored must not change how other activities end."""
+    return bool((s.get("plan") or {}).get("active"))
+
+
+def spoken_list(items):
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def countdown_line(left):
+    if left is None:
+        return ""
+    if left > 1:
+        return "%d days to your exam. " % left
+    if left == 1:
+        return "Your exam is tomorrow. "
+    if left == 0:
+        return "Your exam is today. Good luck! "
+    return "Your exam is done, so German is the main track now. "
+
+
+def offer_today(h, prefix=""):
+    s, p = sess(h), persist(h)
+    today = local_today(h)
+    if p.get("plan_date") != today.isoformat():
+        p["plan_day"] = int(p.get("plan_day", -1)) + 1
+        p["plan_date"] = today.isoformat()
+        save_persist(h)
+    left = plan.days_left(today, p.get("exam_date"))
+    items = resolve_plan(plan.todays_plan(left, int(p.get("plan_day", 0))))
+    s["plan"] = {"items": items, "i": 0, "active": False}
+    s["mode"] = MENU
+    days_streak = plan.streak(p.get("days"), today)
+    streak = ("You're on a %d-day streak. " % days_streak
+              if days_streak >= 2 else "")
+    minutes = sum(ACTIVITIES[a][1] for a in items)
+    speech = (prefix + countdown_line(left) + streak +
+              "Today: %s. About %d minutes. Say yes to start, or ask for "
+              "something else, like mock test or German lesson."
+              % (spoken_list([ACTIVITIES[a][0] for a in items]), minutes))
+    return ask(h, speech, "Say yes to start today's plan, or say menu.")
+
+
+def start_next_planned(h):
+    s = sess(h)
+    nxt = plan_pending(s)
+    if not nxt:
+        return go_menu(h)
+    s["plan"]["i"] += 1
+    s["plan"]["active"] = True
+    return ACTIVITIES[nxt][2](h)
+
+
+def finish(h, done, tail, reprompt, card_title=None, card_text=None):
+    """End an activity: offer the next planned one, or the usual options."""
+    s = sess(h)
+    if not plan_active(s):
+        return ask(h, "%s %s" % (done, tail), reprompt, card_title, card_text)
+    nxt = plan_pending(s)
+    if nxt:
+        label = ACTIVITIES[nxt][0]
+        return ask(h, "%s %s Next on today's plan: %s. Say next when you're "
+                      "ready, or menu to stop." % (done, brk(0.4), label),
+                   "Say next for %s, or menu." % label, card_title, card_text)
+    s.pop("plan", None)
+    return ask(h, "%s %s That's today's plan done. Nice work, see you "
+                  "tomorrow. Say menu if you want more practice, or stop."
+               % (done, brk(0.4)), MENU_SPEECH, card_title, card_text)
+
+
+def start_setup(h, prefix=""):
+    sess(h)["mode"] = SETUP_EXAM
+    return ask(h, prefix + "First, when is your IELTS exam? Say a date, like "
+                           "October the twenty-eighth, or say skip.",
+               "When is your IELTS exam? Say a date, or say skip.")
+
+
+def _date_words(d):
+    return "%s, the <say-as interpret-as='ordinal'>%d</say-as> of %s" % (
+        d.strftime("%A"), d.day, d.strftime("%B"))
+
+
+def save_exam_date(h, text):
+    """Store the exam date; return confirmation SSML, or None if no date."""
+    today = local_today(h)
+    d = plan.parse_exam_date(text, today)
+    if d is None:
+        return None
+    p = persist(h)
+    p["exam_date"] = d.isoformat()
+    save_persist(h)
+    left = (d - today).days
+    when = {0: "that's today", 1: "that's tomorrow"}.get(
+        left, "%d days away" % left)
+    return "Got it: %s, %s. " % (_date_words(d), when)
+
+
+NO_DATE = ("Sorry, I didn't catch a date. Say it like: October the "
+           "twenty-eighth. Or say skip.")
+
+
+def ask_practice_cue(h, prefix=""):
+    sess(h)["mode"] = SETUP_CUE
+    return ask(h, prefix + "When and where will you practise each day? For "
+                           "example: after breakfast, at my desk. Or say skip.",
+               "When and where will you practise? Or say skip.")
+
+
+def finish_setup(h, cue=None):
+    p = persist(h)
+    p["setup_done"] = True
+    prefix = "No problem. "
+    if cue:
+        cue = cue.strip().rstrip(".")[:80]
+        p["practice_cue"] = cue
+        prefix = ("Great. Your plan: %s, say: Alexa, open study coach. An Alexa "
+                  "Routine in the Alexa app can do that for you at the same "
+                  "time each day. " % esc(cue))
+    save_persist(h)
+    return offer_today(h, prefix + brk(0.4))
+
+
+def setup_answer(h, text):
+    if sess(h).get("mode") == SETUP_EXAM:
+        confirm = save_exam_date(h, text)
+        if confirm is None:
+            return ask(h, NO_DATE, NO_DATE)
+        return ask_practice_cue(h, confirm)
+    return finish_setup(h, text)
+
+
+def set_exam_date(h):
+    confirm = save_exam_date(h, slot(h, "date") or "")
+    if confirm is None:
+        return ask(h, NO_DATE, NO_DATE)
+    if sess(h).get("mode") == SETUP_EXAM:
+        return ask_practice_cue(h, confirm)
+    return ask(h, confirm + "Say today's plan to start, or " + MENU_SPEECH,
+               MENU_SPEECH)
+
+
+def progress(h):
+    p = persist(h)
+    today = local_today(h)
+    days = p.get("days") or []
+    hist = p.get("history") or []
+    if not (days or hist or p.get("mocks") or p.get("german_next")):
+        text = ("No practice logged yet, so this is your first session. "
+                "Finish one activity today to start your streak. Say today's "
+                "plan to begin.")
+        return ask(h, esc(text), MENU_SPEECH, "Your progress", text)
+    lines = [countdown_line(plan.days_left(today, p.get("exam_date"))).strip()]
+    n = plan.streak(days, today)
+    lines.append({0: "No streak right now: practise today to start one.",
+                  1: "Your streak is one day. Come back tomorrow to grow it."}
+                 .get(n, "You're on a %d-day streak." % n))
+    mocks = int(p.get("mocks", 0))
+    lines.append("%d mock test%s done." % (mocks, "" if mocks == 1 else "s")
+                 if mocks else "No full mock test yet.")
+    lines.append("German lesson %d of %d is next." % (
+        int(p.get("german_next", 0)) + 1, len(GERMAN_LESSONS)))
+    if hist:
+        first = hist[-1].get("feedback", "").split(". ")[0].rstrip(".")[:160]
+        lines.append("Last feedback: %s." % first)
+    text = " ".join(line for line in lines if line)
+    return ask(h, esc(text) + " Say today's plan to keep going.",
+               "Say today's plan, or menu.", "Your progress", text)
 
 
 # ---------------------------------------------------------------------------
@@ -504,11 +743,17 @@ def route_answer(h, text):
         return answer_listening(h, text)
     if mode == GQUIZ:
         return answer_german(h, text)
+    if mode in (SETUP_EXAM, SETUP_CUE):
+        return setup_answer(h, text)
+    if plan_pending(s) and norm in YES_WORDS:
+        return start_next_planned(h)
     return ask(h, "Sorry, I didn't get that. " + MENU_SPEECH, MENU_SPEECH)
 
 
 def go_menu(h):
-    sess(h)["mode"] = MENU
+    s = sess(h)
+    s["mode"] = MENU
+    s.pop("plan", None)   # leaving the menu way means leaving today's plan
     return ask(h, "Main menu. " + MENU_SPEECH, MENU_SPEECH)
 
 
@@ -527,7 +772,15 @@ def do_repeat(h):
 
 
 def do_next(h):
-    mode = sess(h).get("mode", MENU)
+    s = sess(h)
+    mode = s.get("mode", MENU)
+    if mode == SETUP_EXAM:          # "skip" the exam date
+        return ask_practice_cue(h, "Okay. You can tell me later: say, my exam "
+                                   "is on, then the date. ")
+    if mode == SETUP_CUE:
+        return finish_setup(h)
+    if mode == MENU and plan_pending(s):
+        return start_next_planned(h)
     if mode == P1:
         return answer_part1(h, "(skipped)")
     if mode == P3:
@@ -551,17 +804,15 @@ class Launch(AbstractRequestHandler):
     def handle(self, handler_input):
         h = handler_input
         p = persist(h)
-        visits = int(p.get("visits", 0))
-        p["visits"] = visits + 1
+        p["visits"] = int(p.get("visits", 0)) + 1
         sess(h)["mode"] = MENU
         save_persist(h)
-        if visits == 0:
-            speech = ("Welcome to your IELTS and German coach. I can run a full "
-                      "speaking mock test, practise one part, play a listening "
-                      "drill, or teach you German. " + MENU_SPEECH)
-        else:
-            speech = "Welcome back. " + MENU_SPEECH
-        return ask(h, speech, MENU_SPEECH)
+        if not p.get("setup_done"):
+            return start_setup(h, prefix=(
+                "Welcome to your IELTS and German coach. I run speaking mock "
+                "tests, listening drills and German lessons, and plan each "
+                "day's practice for you. "))
+        return offer_today(h, prefix="Welcome back. ")
 
 
 class Intent(AbstractRequestHandler):
@@ -592,7 +843,7 @@ def _fallback(h):
     mode = s.get("mode", MENU)
     if mode == P2:  # keep a long talk flowing even if a chunk wasn't understood
         return answer_part2(h, "")
-    if mode in (P1, P3, LISTEN, GQUIZ):
+    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE):
         return ask(h, "Sorry, I didn't catch that. " +
                    (s.get("last_reprompt") or ""),
                    s.get("last_reprompt") or MENU_SPEECH)
@@ -608,6 +859,10 @@ def _help(h):
         LISTEN: "Answer the question about the phone call. Say repeat to hear "
                 "the call again.",
         GQUIZ: "Tell me what the German phrase means in English. Say next to skip.",
+        SETUP_EXAM: "Tell me your IELTS exam date, like October the "
+                    "twenty-eighth, or say skip.",
+        SETUP_CUE: "Tell me when and where you'll practise, like after "
+                   "breakfast at my desk, or say skip.",
     }
     tip = tips.get(mode, "")
     return ask(h, (tip + " " if tip else "") + MENU_SPEECH + " You can also "
@@ -696,6 +951,9 @@ def build_skill_builder():
         ("FinishedIntent", _finished),
         ("ListeningDrillIntent", _listening),
         ("GermanLessonIntent", lambda h: start_german(h, slot(h, "lesson"))),
+        ("TodayIntent", offer_today),
+        ("ProgressIntent", progress),
+        ("SetExamDateIntent", set_exam_date),
         ("AnswerIntent", _answer),
         ("MenuIntent", go_menu),
         ("AMAZON.NavigateHomeIntent", go_menu),
