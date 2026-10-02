@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(ROOT, "lambda"))
 import lambda_function as lf  # noqa: E402
 from coach import (feedback, fluency, listening, llm, numbers,  # noqa: E402
                    plan, srs, vocab)
-from coach.content import CUE_CARDS, GERMAN_LESSONS  # noqa: E402
+from coach.content import CUE_CARDS, GERMAN_LESSONS, PHRASES  # noqa: E402
 from datetime import date  # noqa: E402
 
 # Alexa limits (SSML reference / response JSON reference)
@@ -299,7 +299,7 @@ def test_german_flow():
     sim = Sim()
     sim.launch()
     resp, s = sim.intent("GermanLessonIntent")
-    assert "German lesson 1 of 20" in s and "de-DE" in s and "Vicki" in s
+    assert "German lesson 1 of 21" in s and "de-DE" in s and "Vicki" in s
     assert resp["card"]["title"].startswith("German lesson 1")
     for _ in range(5):
         item = sim.attrs["ger"]["items"][sim.attrs["ger"]["i"]]
@@ -307,7 +307,7 @@ def test_german_flow():
     assert "5 out of 5" in s
     assert lf._LOCAL_STORE["german_next"] == 1
     _, s = sim.intent("GermanLessonIntent")
-    assert "German lesson 2 of 20" in s
+    assert "German lesson 2 of 21" in s
     _, s = sim.intent("GermanLessonIntent", lesson="19")
     assert "Review" in s and sim.attrs["ger"]["lesson"] == 18
     _, s = sim.intent("GermanLessonIntent", lesson="20")
@@ -678,7 +678,7 @@ def test_activity_marks_today_once():
 
 def test_one_shot_entry_points():
     for intent, slots, want in [
-            ("GermanLessonIntent", {}, "German lesson 1 of 20"),
+            ("GermanLessonIntent", {}, "German lesson 1 of 21"),
             ("MockTestIntent", {}, "Part 1"),
             ("ListeningDrillIntent", {"accent": "british"}, "Listening drill"),
             ("TodayIntent", {}, "Today:"),
@@ -1012,6 +1012,85 @@ def test_vocab_drill_with_relearning():
     st = lf._LOCAL_STORE["srs"][queue[0]]
     assert st[0] == 1 and st[1] == 1                 # one miss, one recovery
     assert lf._LOCAL_STORE["days"] == ["2026-10-04"]
+
+
+# ---------------------------------------------------------------------------
+# German: hear -> understand -> say, on the review engine
+# ---------------------------------------------------------------------------
+def test_german_phrase_ids_are_stable():
+    assert PHRASES["L1P1"]["de"] == "Hallo"
+    assert PHRASES["L3P2"]["de"] == "Ich heiße Anna."
+    ids = [ph["id"] for L in GERMAN_LESSONS for ph in L["phrases"]]
+    assert len(ids) == len(set(ids)) == len(PHRASES) == 95
+
+
+def test_self_introduction_capstone():
+    last = GERMAN_LESSONS[-1]
+    assert "introduc" in last["title"].lower()
+    des = [ph["de"] for ph in last["phrases"]]
+    assert "Ich lerne Deutsch, weil ich in Deutschland arbeiten möchte." in des
+    assert "weil" in last["tip"]
+
+
+def test_lesson_quiz_feeds_review_engine():
+    sim = Sim()
+    sim.intent("GermanLessonIntent")
+    for _ in range(5):
+        item = sim.attrs["ger"]["items"][sim.attrs["ger"]["i"]]
+        sim.say(item["en"])
+    store = lf._LOCAL_STORE["srs"]
+    assert sorted(store) == ["L1P%d" % i for i in range(1, 6)]
+    assert all(entry[3] == 1 for entry in store.values())
+
+
+def test_german_review_meaning_then_production():
+    sim = Sim(store={"srs": {
+        "L1P1": [1, 0, "2026-10-01", 1],      # due: meaning quiz
+        "L1P2": [3, 0, "2026-09-20", 3],      # most overdue, box 3: say it
+        "L1P3": [1, 0, "2026-10-04", 1]}})    # not due
+    _, s = sim.intent("GermanReviewIntent")
+    assert "German review" in s and sim.attrs["mode"] == "gsay"
+    assert "Say this in German: good morning" in s and "judge" in s
+    _, s = sim.say("good and morgan")         # whatever the recogniser hears
+    assert sim.attrs["mode"] == "gself" and "Guten Morgen" in s
+    _, s = sim.say("got it")
+    assert sim.attrs["mode"] == "gquiz" and "Hallo" in s
+    _, s = sim.say("hello")
+    assert "Review done: 2 of 2" in s
+    store = lf._LOCAL_STORE["srs"]
+    assert store["L1P2"][3] == 4 and store["L1P1"][3] == 2
+    assert store["L1P3"] == [1, 0, "2026-10-04", 1]
+
+
+def test_german_review_missed_production_comes_back():
+    sim = Sim(store={"srs": {"L2P3": [3, 0, "2026-09-20", 3]}})
+    sim.intent("GermanReviewIntent")
+    _, s = sim.intent("AMAZON.FallbackIntent")   # German not recognised
+    assert sim.attrs["mode"] == "gself"
+    _, s = sim.say("missed it")
+    assert "Once more" in s and sim.attrs["mode"] == "gsay"
+    sim.say("und dir")
+    _, s = sim.say("maybe")
+    assert "got it, or missed it" in s           # unclear self-grade
+    _, s = sim.say("yes")
+    assert "Review done: 1 of 2" in s
+    assert lf._LOCAL_STORE["srs"]["L2P3"][:2] == [4, 1]
+
+
+def test_german_review_falls_back_to_lessons():
+    _, s = Sim().intent("GermanReviewIntent")
+    assert "nothing to review yet" in s and "German lesson 1" in s
+    sim = Sim(store={"srs": {"L1P1": [1, 0, "2026-10-04", 1]}})
+    _, s = sim.intent("GermanReviewIntent")
+    assert "Nothing is due" in s and "German lesson" in s
+
+
+def test_progress_reports_german_due():
+    sim = Sim(store={"german_next": 2, "srs": {
+        "L1P1": [1, 0, "2026-10-01", 1], "L1P2": [1, 0, "2026-10-02", 1],
+        "L1P3": [1, 0, "2026-10-04", 1], "V01": [1, 0, "2026-10-01", 1]}})
+    _, s = sim.intent("ProgressIntent")
+    assert "2 German phrases are due for review" in s
 
 
 if __name__ == "__main__":

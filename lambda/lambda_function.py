@@ -28,7 +28,7 @@ from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
 from ask_sdk_model.ui import SimpleCard
 
 from coach import feedback, fluency, listening, plan, srs, vocab
-from coach.content import CUE_CARDS, GERMAN_LESSONS, PART1_TOPICS
+from coach.content import CUE_CARDS, GERMAN_LESSONS, PART1_TOPICS, PHRASES
 from coach.speech import ACCENTS, brk, esc, german
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,10 @@ SKILL_TITLE = "IELTS & German Coach"
 # Conversation modes kept in session attributes
 MENU, P1, P2, P3, LISTEN, GQUIZ = "menu", "p1", "p2", "p3", "listen", "gquiz"
 SETUP_EXAM, SETUP_CUE, RETRY = "setup_exam", "setup_cue", "retry"
-VOCAB = "vocab"
+VOCAB, GSAY, GSELF = "vocab", "gsay", "gself"
 VOCAB_PER_ROUND = 5
+GERMAN_REVIEW_SIZE = 5
+PRODUCTION_BOX = 3   # from this Leitner box on, say the German yourself
 RELEARN_GAP = 3    # a missed item comes back this many items later
 YES_WORDS = {"yes", "yeah", "yep", "ok", "okay", "sure", "ready", "start",
              "let's go", "go", "yes please", "let's start", "continue",
@@ -527,7 +529,7 @@ def lesson_phrases(idx):
     return list(lesson["phrases"])
 
 
-def start_german(h, number=None):
+def start_german(h, number=None, prefix=""):
     mark_active(h)
     s = sess(h)
     p = persist(h)
@@ -560,7 +562,7 @@ def start_german(h, number=None):
                  "it means in English. Number one. %s %s What does it mean?"
                  % (brk(0.3), german(quiz[0]["de"])))
     card = "\n".join("%s = %s" % (ph["de"], ph["en"]) for ph in phrases)
-    return ask(h, " ".join(parts),
+    return ask(h, prefix + " ".join(parts),
                "What does %s mean?" % german(quiz[0]["de"]),
                "German lesson %d: %s" % (idx + 1, lesson["title"]), card)
 
@@ -578,16 +580,26 @@ def german_correct(item, text):
     return any(all(g in words for g in group) for group in item["accept"])
 
 
+def meaning_feedback(item, ok):
+    if ok:
+        fb = "%s That's right, it means %s" % (german("Richtig!"),
+                                               _sentence(item["en"]))
+    else:
+        fb = "Not quite. It means %s" % _sentence(item["en"])
+    return fb + " Say it with me: %s %s" % (german(item["de"]), brk(1.5))
+
+
 def answer_german(h, text):
     s = sess(h)
     G = s["ger"]
+    if G.get("review"):
+        return answer_german_meaning(h, text)
     item = G["items"][G["i"]]
-    if german_correct(item, text):
+    ok = german_correct(item, text)
+    srs.review(srs_store(h), item["id"], ok, local_today(h))
+    if ok:
         G["score"] += 1
-        fb = "%s That's right, it means %s" % (german("Richtig!"), _sentence(item["en"]))
-    else:
-        fb = "Not quite. It means %s" % _sentence(item["en"])
-    fb += " Say it with me: %s %s" % (german(item["de"]), brk(1.5))
+    fb = meaning_feedback(item, ok)
     G["i"] += 1
     nums = ["one", "two", "three", "four", "five"]
     if G["i"] < len(G["items"]):
@@ -682,6 +694,117 @@ def answer_vocab(h, text):
 
 
 # ---------------------------------------------------------------------------
+# German review: hear -> understand -> say  (docs/LEARNING_DESIGN.md 4.7)
+# ---------------------------------------------------------------------------
+GERMAN_IDS = [ph["id"] for L in GERMAN_LESSONS for ph in L["phrases"]]
+GOT_IT = {"got it", "i got it", "yes", "yeah", "yep", "correct", "right",
+          "it matched", "matched", "same", "got"}
+MISSED_IT = {"missed it", "i missed it", "missed", "no", "nope", "wrong",
+             "not quite", "didn't match", "it didn't match"}
+NUMBERS = ["one", "two", "three", "four", "five", "six", "seven", "eight",
+           "nine", "ten"]
+
+
+def start_german_review(h):
+    mark_active(h)
+    store = srs_store(h)
+    taught = [pid for pid in GERMAN_IDS if pid in store]
+    if not taught:
+        return start_german(h, prefix="There's nothing to review yet, so "
+                                      "let's start with a lesson. ")
+    queue = srs.pick(store, taught, local_today(h), GERMAN_REVIEW_SIZE,
+                     new_ok=False)
+    if not queue:
+        return start_german(h, prefix="Nothing is due for review today, so "
+                                      "here's your next lesson. ")
+    sess(h)["ger"] = {"review": True, "queue": queue, "i": 0, "score": 0,
+                      "again": [], "stage": {}, "told": False}
+    return ask_german_item(h, "German review: %d phrases, the ones you're "
+                              "closest to forgetting. " % len(queue))
+
+
+def ask_german_item(h, lead=""):
+    s = sess(h)
+    G = s["ger"]
+    pid = G["queue"][G["i"]]
+    ph = PHRASES[pid]
+    # Once an item is well known (box 3+), switch from understanding it to
+    # producing it. A requeued item keeps the stage it was first asked in.
+    stage = G["stage"].setdefault(
+        pid, "say" if store_box(h, pid) >= PRODUCTION_BOX else "meaning")
+    num = "Number %s. %s" % (NUMBERS[min(G["i"], 9)],
+                             "Once more: " if asked_before(G) else "")
+    if stage == "say":
+        s["mode"] = GSAY
+        intro = ""
+        if not G["told"]:
+            G["told"] = True
+            intro = ("You know some of these well, so now you say them. I "
+                     "can't hear German pronunciation, so you'll be the "
+                     "judge. ")
+        return ask(h, lead + intro + num + "Say this in German: " +
+                   _sentence(ph["en"]),
+                   "Say it in German: " + _sentence(ph["en"]))
+    s["mode"] = GQUIZ
+    return ask(h, lead + num + "%s What does it mean?" % german(ph["de"]),
+               "What does %s mean?" % german(ph["de"]))
+
+
+def store_box(h, pid):
+    return srs_store(h).get(pid, [0, 0, None, 0])[3]
+
+
+def answer_german_meaning(h, text):
+    G = sess(h)["ger"]
+    pid = G["queue"][G["i"]]
+    ok = german_correct(PHRASES[pid], text)
+    return grade_german(h, pid, ok, meaning_feedback(PHRASES[pid], ok))
+
+
+def german_attempt(h, text):
+    """Any attempt (even one the English recogniser garbles) reveals the
+    model answer; the learner then grades themselves."""
+    s = sess(h)
+    ph = PHRASES[s["ger"]["queue"][s["ger"]["i"]]]
+    s["mode"] = GSELF
+    return ask(h, "Here it is: %s %s %s %s Did yours match? Say got it, or "
+                  "missed it." % (german(ph["de"], "80%"), brk(0.5),
+                                  german(ph["de"]), brk(0.4)),
+               "Did yours match? Say got it, or missed it.")
+
+
+def german_self_grade(h, text):
+    norm = (text or "").lower().strip(" .!?")
+    if norm not in GOT_IT and norm not in MISSED_IT:
+        return ask(h, "Just say got it, or missed it.",
+                   "Did yours match? Say got it, or missed it.")
+    G = sess(h)["ger"]
+    ok = norm in GOT_IT
+    fb = "Good." if ok else "No problem: it will come back soon."
+    return grade_german(h, G["queue"][G["i"]], ok, fb)
+
+
+def grade_german(h, pid, ok, fb):
+    s = sess(h)
+    G = s["ger"]
+    srs.review(srs_store(h), pid, ok, local_today(h))
+    if ok:
+        G["score"] += 1
+    else:
+        requeue_if_missed(G, pid)
+    G["i"] += 1
+    if G["i"] < len(G["queue"]):
+        return ask_german_item(h, fb + " " + brk(0.4))
+    srs.prune(srs_store(h))
+    save_persist(h)
+    s["mode"] = MENU
+    return finish(h, "%s %s Review done: %d of %d." % (
+        fb, brk(0.4), G["score"], len(G["queue"])),
+        "Say German lesson for new phrases, or menu.",
+        "Say German lesson, or menu.")
+
+
+# ---------------------------------------------------------------------------
 # Today's plan, first-run setup, progress  (docs/LEARNING_DESIGN.md 4.1, 4.8)
 # ---------------------------------------------------------------------------
 ACTIVITIES = {
@@ -694,16 +817,15 @@ ACTIVITIES = {
     "listen": ("a listening call", 4, lambda h: start_listening(h)),
     "vocab": ("a vocabulary drill", 4, lambda h: start_vocab(h)),
     "german": ("a German lesson", 6, lambda h: start_german(h)),
+    "greview": ("German review", 3, lambda h: start_german_review(h)),
 }
-# Planned activities not built yet fall back to their nearest neighbour.
-PLAN_FALLBACK = {"greview": "german"}
 
 
 def resolve_plan(ids):
+    """Known activity ids, each once, in order."""
     out = []
     for a in ids:
-        a = a if a in ACTIVITIES else PLAN_FALLBACK.get(a)
-        if a and a not in out:
+        if a in ACTIVITIES and a not in out:
             out.append(a)
     return out
 
@@ -891,6 +1013,10 @@ def progress(h):
                      "practise it more." % LISTEN_LABELS[weak])
     lines.append("German lesson %d of %d is next." % (
         int(p.get("german_next", 0)) + 1, len(GERMAN_LESSONS)))
+    due = srs.due_count(p.get("srs") or {}, GERMAN_IDS, today)
+    if due:
+        lines.append("%d German phrase%s due for review." % (
+            due, "s are" if due != 1 else " is"))
     if hist:
         first = hist[-1].get("feedback", "").split(". ")[0].rstrip(".")[:160]
         lines.append("Last feedback: %s." % first)
@@ -944,6 +1070,10 @@ def route_answer(h, text):
         return answer_retry(h, text)
     if mode == VOCAB:
         return answer_vocab(h, text)
+    if mode == GSAY:
+        return german_attempt(h, text)
+    if mode == GSELF:
+        return german_self_grade(h, text)
     if plan_pending(s) and norm in YES_WORDS:
         return start_next_planned(h)
     return ask(h, "Sorry, I didn't get that. " + MENU_SPEECH, MENU_SPEECH)
@@ -981,6 +1111,10 @@ def do_next(h):
         return answer_retry(h, "", skipped=True)
     if mode == VOCAB:
         return answer_vocab(h, "")
+    if mode == GSAY:
+        return german_attempt(h, "")
+    if mode == GSELF:
+        return german_self_grade(h, "missed it")
     if mode == MENU and plan_pending(s):
         return start_next_planned(h)
     if mode == P1:
@@ -1045,7 +1179,10 @@ def _fallback(h):
     mode = s.get("mode", MENU)
     if mode == P2:  # keep a long talk flowing even if a chunk wasn't understood
         return answer_part2(h, "")
-    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE, RETRY, VOCAB):
+    if mode == GSAY:  # spoken German often isn't understood: just reveal it
+        return german_attempt(h, "")
+    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE, RETRY, VOCAB,
+                GSELF):
         return ask(h, "Sorry, I didn't catch that. " +
                    (s.get("last_reprompt") or ""),
                    s.get("last_reprompt") or MENU_SPEECH)
@@ -1069,6 +1206,9 @@ def _help(h):
                "Say skip to move on.",
         VOCAB: "Say the sentence again with one stronger word instead of the "
                "plain one. Say next to hear an answer.",
+        GSAY: "Say the phrase in German, then I'll play it so you can "
+              "compare. Say next to just hear it.",
+        GSELF: "Did your German match mine? Say got it, or missed it.",
     }
     tip = tips.get(mode, "")
     return ask(h, (tip + " " if tip else "") + MENU_SPEECH + " You can also "
@@ -1159,6 +1299,7 @@ def build_skill_builder():
         ("GermanLessonIntent", lambda h: start_german(h, slot(h, "lesson"))),
         ("FluencyRoundsIntent", lambda h: start_part2(h, rounds=True)),
         ("VocabDrillIntent", start_vocab),
+        ("GermanReviewIntent", start_german_review),
         ("TodayIntent", offer_today),
         ("ProgressIntent", progress),
         ("SetExamDateIntent", set_exam_date),

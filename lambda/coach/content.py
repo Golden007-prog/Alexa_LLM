@@ -222,7 +222,8 @@ CUE_CARDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# German A1 foundation - 20 lessons, 5 phrases each.
+# German A1 foundation - 21 lessons: 18 of 5 phrases, 2 reviews, and a
+# self-introduction capstone.
 # Each phrase: (german, english meaning, list of accepted keyword groups).
 # An answer is correct if ALL words of ANY keyword group appear in it.
 # ---------------------------------------------------------------------------
@@ -431,7 +432,33 @@ GERMAN_LESSONS = [
     {"title": "Review: weeks three and four", "review": [10, 17], "tip": (
         "You have learned about ninety phrases. Gut gemacht: well done."),
      "phrases": []},
+    # ---- Capstone: put the frames together into a self-introduction
+    {"title": "Introducing yourself", "tip": (
+        "After weil, the verb goes to the very end: weil ich in Deutschland "
+        "arbeiten möchte. Swap in your own age and job when you practise."),
+     "phrases": [
+         _p("Darf ich mich vorstellen?", "may I introduce myself?",
+            "introduce"),
+         _p("Ich bin dreißig Jahre alt.", "I am thirty years old.", "thirty",
+            "30", "years old"),
+         _p("Ich bin Softwareentwickler von Beruf.",
+            "I'm a software developer by profession.", "software",
+            "developer", "programmer"),
+         _p("In meiner Freizeit lese ich gern.",
+            "in my free time I like reading.", "reading", "read", "books"),
+         _p("Ich lerne Deutsch, weil ich in Deutschland arbeiten möchte.",
+            "I'm learning German because I'd like to work in Germany.",
+            "germany", "because work"),
+     ]},
 ]
+
+# Stable ids for spaced review: L3P2 = lesson 3, phrase 2. Append new
+# phrases at the end of a lesson so saved progress keeps its meaning.
+PHRASES = {}
+for _li, _lesson in enumerate(GERMAN_LESSONS):
+    for _pi, _ph in enumerate(_lesson["phrases"]):
+        _ph["id"] = "L%dP%d" % (_li + 1, _pi + 1)
+        PHRASES[_ph["id"]] = _ph
 
 # ---------------------------------------------------------------------------
 # Listening drill data

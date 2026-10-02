@@ -201,6 +201,20 @@
           ]
         },
         {
+          "name": "GermanReviewIntent",
+          "slots": [],
+          "samples": [
+            "german review",
+            "review german",
+            "a german review",
+            "my german review",
+            "german revision",
+            "revise german",
+            "review my german phrases",
+            "german flashcards"
+          ]
+        },
+        {
           "name": "VocabDrillIntent",
           "slots": [],
           "samples": [
