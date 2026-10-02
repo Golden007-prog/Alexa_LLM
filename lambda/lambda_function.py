@@ -445,19 +445,45 @@ def answer_retry(h, text, skipped=False):
 # ---------------------------------------------------------------------------
 # IELTS Listening drill
 # ---------------------------------------------------------------------------
+LISTEN_LABELS = {"surname": "spelling names", "digits": "phone numbers",
+                 "day": "dates", "number": "numbers",
+                 "choice": "multiple choice"}
+MIN_ATTEMPTS_FOR_WEAK_SPOT = 3
+
+
+def weakest_listening(stats):
+    """The item kind with the lowest accuracy (enough attempts), or None."""
+    rated = [(c / float(c + w), kind) for kind, (c, w) in (stats or {}).items()
+             if c + w >= MIN_ATTEMPTS_FOR_WEAK_SPOT]
+    if not rated:
+        return None
+    acc, kind = min(rated)
+    return kind if acc < 0.8 else None
+
+
+def listen_question(item):
+    if item["kind"] == "choice":
+        return esc(listening.choice_question(item))
+    return esc(item["q"])
+
+
 def start_listening(h, accent=None):
     mark_active(h)
-    s = sess(h)
-    drill = listening.make_drill(accent)
+    s, p = sess(h), persist(h)
+    drill = listening.make_drill(
+        accent, recent=p.get("accents"),
+        hard_spelling=weakest_listening(p.get("listen_stats")) == "surname")
+    p["accents"] = (list(p.get("accents") or []) + [drill["accent"]])[-3:]
     s["mode"] = LISTEN
     s["listen"] = {"items": drill["items"], "i": 0, "score": 0,
                    "dialog": drill["dialog"]}
-    q = drill["items"][0]["q"]
+    q = listen_question(drill["items"][0])
     speech = ("Listening drill, %s accent. Get a pen ready. You'll hear a "
-              "phone call once, like in the exam. Write down the surname, the "
-              "phone number, the date and the number. %s %s %s Question one. %s"
-              % (drill["label"], brk(1.5), drill["dialog"], brk(1), esc(q)))
-    return ask(h, speech, "Question one. " + esc(q))
+              "phone call once, like in the exam. Listen for: %s. %s %s %s "
+              "Question one. %s"
+              % (drill["label"], esc(drill["preview"]), brk(1.5),
+                 drill["dialog"], brk(1), q))
+    return ask(h, speech, "Question one. " + q)
 
 
 def answer_listening(h, text):
@@ -467,13 +493,16 @@ def answer_listening(h, text):
     ok, fb = listening.check(item, text)
     if ok:
         L["score"] += 1
+    stats = persist(h).setdefault("listen_stats", {})
+    right, wrong = stats.get(item["kind"], [0, 0])
+    stats[item["kind"]] = [right + int(ok), wrong + int(not ok)]
     L["i"] += 1
     if L["i"] < len(L["items"]):
-        nums = ["one", "two", "three", "four"]
-        q = L["items"][L["i"]]["q"]
-        return ask(h, "%s %s Question %s. %s" % (fb, brk(0.4), nums[L["i"]],
-                                                  esc(q)),
-                   esc(q))
+        nums = ["one", "two", "three", "four", "five"]
+        q = listen_question(L["items"][L["i"]])
+        return ask(h, "%s %s Question %s. %s" % (fb, brk(0.4), nums[L["i"]], q),
+                   q)
+    save_persist(h)
     s["mode"] = MENU
     total = len(L["items"])
     return finish(h, "%s %s You scored %d out of %d." % (fb, brk(0.4),
@@ -764,7 +793,8 @@ def progress(h):
     today = local_today(h)
     days = p.get("days") or []
     hist = p.get("history") or []
-    if not (days or hist or p.get("mocks") or p.get("german_next")):
+    if not (days or hist or any(p.get(k) for k in (
+            "mocks", "german_next", "listen_stats", "p2_best_pace", "srs"))):
         text = ("No practice logged yet, so this is your first session. "
                 "Finish one activity today to start your streak. Say today's "
                 "plan to begin.")
@@ -783,6 +813,10 @@ def progress(h):
     if p.get("focus"):
         lines.append("Your focus: %s." % p["focus"].get("label",
                                                          p["focus"]["say"]))
+    weak = weakest_listening(p.get("listen_stats"))
+    if weak:
+        lines.append("Your weakest listening item is %s, so drills will "
+                     "practise it more." % LISTEN_LABELS[weak])
     lines.append("German lesson %d of %d is next." % (
         int(p.get("german_next", 0)) + 1, len(GERMAN_LESSONS)))
     if hist:
@@ -852,10 +886,9 @@ def do_repeat(h):
     s = sess(h)
     if s.get("mode") == LISTEN:
         L = s["listen"]
-        q = L["items"][L["i"]]["q"]
+        q = listen_question(L["items"][L["i"]])
         return ask(h, "In the exam you only hear it once, but here it is "
-                      "again. %s %s %s" % (L["dialog"], brk(0.8), esc(q)),
-                   esc(q))
+                      "again. %s %s %s" % (L["dialog"], brk(0.8), q), q)
     speech = s.get("last_speech")
     if not speech:
         return go_menu(h)

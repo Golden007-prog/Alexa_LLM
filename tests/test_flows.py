@@ -200,7 +200,7 @@ def test_numbers():
 def test_listening_checks():
     d = listening.make_drill("british", seed=3)
     xml.dom.minidom.parseString("<speak>%s</speak>" % d["dialog"])
-    sur, phone, day, num = d["items"]
+    sur, phone, day, num, _choice = d["items"]
     assert listening.check(sur, " ".join(sur["value"].upper()))[0]
     assert listening.check(sur, sur["value"].lower())[0]
     assert not listening.check(sur, "smith")[0]
@@ -289,8 +289,9 @@ def test_listening_flow():
     sim.say(" ".join(items[0]["value"].lower()))
     sim.say("I don't know")
     sim.say("the %d" % items[2]["value"])
-    _, s = sim.say("%d" % items[3]["value"])
-    assert "You scored 3 out of 4" in s, s
+    sim.say("%d" % items[3]["value"])
+    _, s = sim.say("I'm not sure")
+    assert "You scored 3 out of 5" in s, s
 
 
 def test_german_flow():
@@ -835,6 +836,83 @@ def test_retry_can_be_skipped_or_missed():
         _, s = sim.intent("AMAZON.NextIntent")
         assert sim.attrs["mode"] == "menu" and "Skipping" in s
     llm._cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Listening drill v2
+# ---------------------------------------------------------------------------
+def test_every_scenario_renders_with_one_trap():
+    assert len(listening.SCENARIOS) >= 10
+    for i in range(len(listening.SCENARIOS)):
+        for accent in ("british", "australian", "american"):
+            d = listening.make_drill(accent, seed=i, scenario=i)
+            xml.dom.minidom.parseString("<speak>%s</speak>" % d["dialog"])
+            traps = sum(d["dialog"].count(t) for t in listening.SELF_CORRECTIONS)
+            assert traps == 1, (i, accent)
+            kinds = [it["kind"] for it in d["items"]]
+            assert kinds == ["surname", "digits", "day", "number", "choice"]
+            choice = d["items"][4]
+            for opt in choice["options"]:
+                assert listening.esc(opt) in d["dialog"], (i, opt)
+            assert choice["distractor"] != choice["value"]
+            check_ssml("<speak>%s</speak>" % d["dialog"], MAX_AUDIO_SECONDS,
+                       "dialog %d" % i)
+
+
+def test_choice_answers():
+    d = listening.make_drill("british", seed=1, scenario=7)  # boat tours
+    item = d["items"][4]
+    want = item["value"]
+    letter = "abc"[want]
+    variants = {"a": ["a", "option a", "ay"], "b": ["b", "bee", "option b"],
+                "c": ["c", "see", "sea", "option c"]}[letter]
+    for answer in variants + ["the answer is %s" % letter,
+                              item["options"][want],
+                              item["options"][want].replace("the ", "")]:
+        assert listening.check(item, answer)[0], answer
+    wrong = item["distractor"]
+    ok, fb = listening.check(item, item["options"][wrong])
+    assert not ok and "turned it down" in fb
+    assert not listening.check(item, "I don't know")[0]
+    sit = {"kind": "choice", "value": 1, "distractor": 0,
+           "options": ["a buffet", "a sit-down dinner", "snacks only"]}
+    assert listening.check(sit, "a sit down dinner")[0]
+    assert listening.check(sit, "it was a dinner")[0]
+    assert not listening.check(sit, "a buffet or a dinner")[0]
+
+
+def test_accent_rotation_is_fair():
+    recent, seq = [], []
+    for k in range(12):
+        d = listening.make_drill(seed=k, recent=recent)
+        seq.append(d["accent"])
+        recent = (recent + [d["accent"]])[-3:]
+    for i in range(len(seq) - 2):
+        assert len(set(seq[i:i + 3])) == 3, seq
+
+
+def test_hard_spelling_uses_long_surnames():
+    for k in range(20):
+        d = listening.make_drill("british", seed=k, hard_spelling=True)
+        assert len(d["items"][0]["value"]) >= listening.LONG_SURNAME
+
+
+def test_listening_stats_rotation_and_weak_spot():
+    sim = Sim(store={"accents": ["british", "american"]})
+    _, s = sim.intent("ListeningDrillIntent")
+    assert "Listen for" in s and "Australian" in s
+    for _ in sim.attrs["listen"]["items"]:
+        sim.say("no idea")
+    stats = lf._LOCAL_STORE["listen_stats"]
+    assert stats["surname"] == [0, 1] and stats["choice"] == [0, 1]
+    assert lf._LOCAL_STORE["accents"][-1] == "australian"
+    sim = Sim(store={"listen_stats": {"surname": [1, 4], "digits": [5, 0],
+                                      "day": [3, 1]}})
+    _, s = sim.intent("ProgressIntent")
+    assert "weakest listening item is spelling names" in s
+    sim.intent("ListeningDrillIntent")
+    assert len(sim.attrs["listen"]["items"][0]["value"]) >= \
+        listening.LONG_SURNAME
 
 
 if __name__ == "__main__":
