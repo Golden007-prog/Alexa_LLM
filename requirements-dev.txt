@@ -1,0 +1,4 @@
+# Local and CI test dependencies. The skill itself needs only lambda/requirements.txt.
+-r lambda/requirements.txt
+pytest>=7
+vermin>=1.6

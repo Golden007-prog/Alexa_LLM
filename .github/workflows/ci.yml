@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the Alexa-hosted Lambda runtime; 3.12 keeps us ready for
+        # Amazon moving it (AWS blocks python3.8 updates from March 2027).
+        python: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+          activate-environment: true
+
+      - name: Install
+        run: uv pip install -r requirements-dev.txt
+
+      - name: Tests (pytest)
+        run: python -m pytest
+
+      - name: Tests (script runner, as the README documents)
+        run: python tests/test_flows.py
+
+      - name: Lambda code stays Python 3.8 compatible
+        run: vermin -t=3.8- --no-tips --violations lambda/
+
+      - name: No API keys committed
+        run: |
+          if git grep -nE "AIza[0-9A-Za-z_-]{20,}|sk-ant-[0-9A-Za-z_-]{10,}"; then
+            echo "Possible API key in the repository" >&2
+            exit 1
+          fi
