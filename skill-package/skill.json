@@ -1,0 +1,78 @@
+{
+  "manifest": {
+    "manifestVersion": "1.0",
+    "publishingInformation": {
+      "locales": {
+        "en-IN": {
+          "name": "IELTS and German Coach",
+          "summary": "IELTS Speaking mock tests, listening drills and beginner German lessons.",
+          "description": "A personal practice coach. Run a full IELTS Speaking mock test with an AI examiner's feedback, practise one part at a time, train your ear with IELTS-style listening drills in British, Australian and American accents, and learn beginner German with a native German voice.",
+          "examplePhrases": [
+            "Alexa, open study coach",
+            "Alexa, ask study coach for a mock test",
+            "Alexa, ask study coach for a German lesson"
+          ],
+          "keywords": [
+            "ielts",
+            "english",
+            "german",
+            "speaking",
+            "listening"
+          ]
+        },
+        "en-US": {
+          "name": "IELTS and German Coach",
+          "summary": "IELTS Speaking mock tests, listening drills and beginner German lessons.",
+          "description": "A personal practice coach. Run a full IELTS Speaking mock test with an AI examiner's feedback, practise one part at a time, train your ear with IELTS-style listening drills in British, Australian and American accents, and learn beginner German with a native German voice.",
+          "examplePhrases": [
+            "Alexa, open study coach",
+            "Alexa, ask study coach for a mock test",
+            "Alexa, ask study coach for a German lesson"
+          ],
+          "keywords": [
+            "ielts",
+            "english",
+            "german",
+            "speaking",
+            "listening"
+          ]
+        },
+        "en-GB": {
+          "name": "IELTS and German Coach",
+          "summary": "IELTS Speaking mock tests, listening drills and beginner German lessons.",
+          "description": "A personal practice coach. Run a full IELTS Speaking mock test with an AI examiner's feedback, practise one part at a time, train your ear with IELTS-style listening drills in British, Australian and American accents, and learn beginner German with a native German voice.",
+          "examplePhrases": [
+            "Alexa, open study coach",
+            "Alexa, ask study coach for a mock test",
+            "Alexa, ask study coach for a German lesson"
+          ],
+          "keywords": [
+            "ielts",
+            "english",
+            "german",
+            "speaking",
+            "listening"
+          ]
+        }
+      },
+      "isAvailableWorldwide": true,
+      "distributionCountries": [],
+      "testingInstructions": "Personal development skill. Say: open study coach, then mock test, listening drill, or German lesson."
+    },
+    "apis": {
+      "custom": {}
+    },
+    "privacyAndCompliance": {
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false,
+      "locales": {
+        "en-IN": {},
+        "en-US": {},
+        "en-GB": {}
+      }
+    }
+  }
+}

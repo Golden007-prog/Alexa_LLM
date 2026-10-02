@@ -1,0 +1,479 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "study coach",
+      "modelConfiguration": {
+        "fallbackIntentSensitivity": {
+          "level": "LOW"
+        }
+      },
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": [
+            "what can i say",
+            "how does this work"
+          ]
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.RepeatIntent",
+          "samples": [
+            "say that again",
+            "repeat the question",
+            "pardon",
+            "can you repeat that"
+          ]
+        },
+        {
+          "name": "AMAZON.NextIntent",
+          "samples": [
+            "skip",
+            "skip this one",
+            "next question"
+          ]
+        },
+        {
+          "name": "MockTestIntent",
+          "slots": [],
+          "samples": [
+            "mock test",
+            "start a mock test",
+            "full mock test",
+            "full test",
+            "do a mock test",
+            "speaking test",
+            "start the speaking test",
+            "i want a mock test",
+            "practice test"
+          ]
+        },
+        {
+          "name": "PartOneIntent",
+          "slots": [],
+          "samples": [
+            "part one",
+            "part 1",
+            "start part one",
+            "practice part one",
+            "interview questions",
+            "part one practice"
+          ]
+        },
+        {
+          "name": "PartTwoIntent",
+          "slots": [],
+          "samples": [
+            "part two",
+            "part 2",
+            "start part two",
+            "cue card",
+            "give me a cue card",
+            "long turn",
+            "part two practice"
+          ]
+        },
+        {
+          "name": "PartThreeIntent",
+          "slots": [],
+          "samples": [
+            "part three",
+            "part 3",
+            "start part three",
+            "discussion questions",
+            "part three practice"
+          ]
+        },
+        {
+          "name": "FeedbackIntent",
+          "slots": [],
+          "samples": [
+            "feedback",
+            "give me feedback",
+            "how did i do",
+            "what's my band",
+            "score me",
+            "rate my answers",
+            "review my answers"
+          ]
+        },
+        {
+          "name": "FinishedIntent",
+          "slots": [],
+          "samples": [
+            "i'm finished",
+            "i am finished",
+            "finished",
+            "i'm done",
+            "i am done",
+            "that's all",
+            "that's it",
+            "end my talk"
+          ]
+        },
+        {
+          "name": "MenuIntent",
+          "slots": [],
+          "samples": [
+            "menu",
+            "main menu",
+            "options",
+            "go back to the menu"
+          ]
+        },
+        {
+          "name": "ListeningDrillIntent",
+          "slots": [
+            {
+              "name": "accent",
+              "type": "ACCENT"
+            }
+          ],
+          "samples": [
+            "listening drill",
+            "listening practice",
+            "listening",
+            "start a listening drill",
+            "listening drill {accent}",
+            "{accent} listening drill",
+            "listening drill with an {accent} accent",
+            "listening practice {accent}"
+          ]
+        },
+        {
+          "name": "GermanLessonIntent",
+          "slots": [
+            {
+              "name": "lesson",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "german lesson",
+            "german",
+            "teach me german",
+            "german practice",
+            "start german",
+            "learn german",
+            "german lesson {lesson}",
+            "lesson {lesson}",
+            "german lesson number {lesson}",
+            "repeat german lesson {lesson}"
+          ]
+        },
+        {
+          "name": "AnswerIntent",
+          "slots": [
+            {
+              "name": "answer",
+              "type": "ANSWER_TEXT"
+            }
+          ],
+          "samples": [
+            "{answer}",
+            "my answer is {answer}",
+            "the answer is {answer}"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "name": "ACCENT",
+          "values": [
+            {
+              "name": {
+                "value": "british",
+                "synonyms": [
+                  "uk",
+                  "english",
+                  "britain",
+                  "england"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "australian",
+                "synonyms": [
+                  "aussie",
+                  "australia"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "american",
+                "synonyms": [
+                  "us",
+                  "usa",
+                  "north american",
+                  "canadian"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ANSWER_TEXT",
+          "values": [
+            {
+              "name": {
+                "value": "i live in a big city in the south of india"
+              }
+            },
+            {
+              "name": {
+                "value": "my favourite hobby is reading novels"
+              }
+            },
+            {
+              "name": {
+                "value": "yes i do"
+              }
+            },
+            {
+              "name": {
+                "value": "no not really"
+              }
+            },
+            {
+              "name": {
+                "value": "i think it depends on the situation"
+              }
+            },
+            {
+              "name": {
+                "value": "to be honest i prefer staying at home"
+              }
+            },
+            {
+              "name": {
+                "value": "i work as a software engineer"
+              }
+            },
+            {
+              "name": {
+                "value": "i am studying data science"
+              }
+            },
+            {
+              "name": {
+                "value": "it was about three years ago"
+              }
+            },
+            {
+              "name": {
+                "value": "because it helps me relax after work"
+              }
+            },
+            {
+              "name": {
+                "value": "for example last weekend i went hiking with my friends"
+              }
+            },
+            {
+              "name": {
+                "value": "on the other hand some people think it is a waste of time"
+              }
+            },
+            {
+              "name": {
+                "value": "thornton"
+              }
+            },
+            {
+              "name": {
+                "value": "t h o r n t o n"
+              }
+            },
+            {
+              "name": {
+                "value": "w h i t a k e r"
+              }
+            },
+            {
+              "name": {
+                "value": "oh seven nine four six three eight two one five one"
+              }
+            },
+            {
+              "name": {
+                "value": "double four five six"
+              }
+            },
+            {
+              "name": {
+                "value": "zero four one two three four five six seven eight"
+              }
+            },
+            {
+              "name": {
+                "value": "the fifteenth of march"
+              }
+            },
+            {
+              "name": {
+                "value": "march fifteenth"
+              }
+            },
+            {
+              "name": {
+                "value": "fifteenth"
+              }
+            },
+            {
+              "name": {
+                "value": "twenty first"
+              }
+            },
+            {
+              "name": {
+                "value": "four people"
+              }
+            },
+            {
+              "name": {
+                "value": "three nights"
+              }
+            },
+            {
+              "name": {
+                "value": "eight weeks"
+              }
+            },
+            {
+              "name": {
+                "value": "thirty five guests"
+              }
+            },
+            {
+              "name": {
+                "value": "good morning"
+              }
+            },
+            {
+              "name": {
+                "value": "thank you very much"
+              }
+            },
+            {
+              "name": {
+                "value": "what's your name"
+              }
+            },
+            {
+              "name": {
+                "value": "i am hungry"
+              }
+            },
+            {
+              "name": {
+                "value": "the bill please"
+              }
+            },
+            {
+              "name": {
+                "value": "where are you from"
+              }
+            },
+            {
+              "name": {
+                "value": "how much does it cost"
+              }
+            },
+            {
+              "name": {
+                "value": "the train station"
+              }
+            },
+            {
+              "name": {
+                "value": "straight ahead"
+              }
+            },
+            {
+              "name": {
+                "value": "excuse me"
+              }
+            },
+            {
+              "name": {
+                "value": "nice to meet you"
+              }
+            },
+            {
+              "name": {
+                "value": "half past three"
+              }
+            },
+            {
+              "name": {
+                "value": "the weekend"
+              }
+            },
+            {
+              "name": {
+                "value": "in the evening"
+              }
+            },
+            {
+              "name": {
+                "value": "i don't understand"
+              }
+            },
+            {
+              "name": {
+                "value": "i would say that technology has changed the way we communicate"
+              }
+            },
+            {
+              "name": {
+                "value": "well that's a difficult question"
+              }
+            },
+            {
+              "name": {
+                "value": "personally i believe governments should invest more in public transport"
+              }
+            },
+            {
+              "name": {
+                "value": "when i was a child i used to play cricket every evening"
+              }
+            },
+            {
+              "name": {
+                "value": "it is a small town near the coast and the people are very friendly"
+              }
+            },
+            {
+              "name": {
+                "value": "the place i want to describe is a park near my house"
+              }
+            },
+            {
+              "name": {
+                "value": "so that's why it took me so long"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

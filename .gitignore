@@ -1,0 +1,9 @@
+# Real LLM config holds an API key; only config.example.json is tracked
+lambda/config.json
+__pycache__/
+*.pyc
+.venv/
+.ask/
+.pytest_cache/
+# Local agent tooling state
+.claude-flow/
