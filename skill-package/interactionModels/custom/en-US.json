@@ -187,6 +187,20 @@
           ]
         },
         {
+          "name": "FluencyRoundsIntent",
+          "slots": [],
+          "samples": [
+            "fluency rounds",
+            "fluency drill",
+            "fluency practice",
+            "a fluency drill",
+            "part two rounds",
+            "part 2 rounds",
+            "part two fluency rounds",
+            "speaking fluency drill"
+          ]
+        },
+        {
           "name": "TodayIntent",
           "slots": [],
           "samples": [

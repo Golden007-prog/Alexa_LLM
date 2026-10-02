@@ -21,7 +21,8 @@ ROOT = os.path.join(HERE, "..")
 sys.path.insert(0, os.path.join(ROOT, "lambda"))
 
 import lambda_function as lf  # noqa: E402
-from coach import feedback, listening, llm, numbers, plan  # noqa: E402
+from coach import (feedback, fluency, listening, llm, numbers,  # noqa: E402
+                   plan)
 from coach.content import CUE_CARDS, GERMAN_LESSONS  # noqa: E402
 from datetime import date  # noqa: E402
 
@@ -238,7 +239,7 @@ def test_mock_test_rule_based():
                           "it is very good for their health", 15)
     assert "end of the speaking test" in s or "linking" in s
     assert resp.get("card", {}).get("title") == "Speaking feedback"
-    assert sim.attrs.get("mode") == "menu"
+    assert sim.attrs.get("mode") == "retry"      # feedback ends with a retry
     _, s2 = sim.intent("AMAZON.RepeatIntent")
     assert s2 == s
 
@@ -646,11 +647,15 @@ def test_progress_report():
     sim = Sim(store={
         "exam_date": "2026-10-16", "mocks": 2, "german_next": 5,
         "days": ["2026-10-02", "2026-10-03", "2026-10-04"],
+        "p2_best_pace": 125,
+        "focus": {"say": "although", "label": "although",
+                  "accept": ["although"]},
         "history": [{"date": "2026-10-03", "ai": False,
                      "feedback": "Use more linking phrases. Second line."}]})
     resp, s = sim.intent("ProgressIntent")
     for want in ("12 days to your exam", "3-day streak", "2 mock tests",
-                 "German lesson 6", "Use more linking phrases"):
+                 "German lesson 6", "Use more linking phrases",
+                 "about 125 words a minute", "Your focus: although"):
         assert want in s, (want, s)
     assert "Second line" not in s
     assert resp["card"]["title"] == "Your progress"
@@ -689,6 +694,147 @@ def test_one_shot_entry_points():
     for intent_samples in samples.values():
         for sample in intent_samples:
             assert not sample.startswith(("ask ", "for ", "to ")), sample
+
+
+# ---------------------------------------------------------------------------
+# Part 2 fluency rounds and focused feedback
+# ---------------------------------------------------------------------------
+STORY = ("the skill i want to describe is cooking which i learned from my "
+         "mother when i was a teenager in kolkata")          # 20 words
+
+
+def test_fluency_summary_numbers():
+    r1 = {"words": 200, "secs": 120}
+    r3 = {"words": 140, "secs": 60}
+    ideas = ["cooking", "mother", "kolkata", "teenager", "skill", "learned",
+             "describe", "school", "kitchen"]
+    text = fluency.summary([r1, {"words": 150, "secs": 90}, r3],
+                           first_content=ideas,
+                           last_content=ideas + ["zebra"])   # 9 of 10 kept
+    assert "about 100 to about 140 words a minute" in text
+    assert "90 per cent" in text and "rough" in text
+    assert fluency.pace(0, 0) == 0
+    assert "cooking" in fluency.content_words(STORY)
+    assert "which" not in fluency.content_words(STORY)
+
+
+def test_fluency_summary_with_skipped_rounds():
+    ideas = ["cooking", "mother"]
+    text = fluency.summary([{"words": 200, "secs": 120},
+                            {"words": 150, "secs": 90},
+                            {"words": 0, "secs": 0}], ideas, [])
+    assert "about 0" not in text and "about 100 to about 100" not in text
+    assert "about 100" in text and "all three rounds" in text
+    text = fluency.summary([{"words": 0, "secs": 0}] * 3, [], [])
+    assert "about 0" not in text and "all three rounds" in text
+
+
+def test_part2_fluency_rounds():
+    sim = Sim()
+    sim.launch()
+    _, s = sim.intent("FluencyRoundsIntent")
+    assert "three times" in s and "Part 2" in text_of(s)
+    rounds_seen = []
+    for _ in range(60):
+        _, s = sim.say(STORY, 10)
+        if "Round two" in s or "Round three" in s:
+            rounds_seen.append(sim.attrs["p2"]["rounds"][-1]["secs"])
+        if "words a minute" in s:
+            break
+    assert "words a minute" in s and "rough" in s
+    secs = [r["secs"] for r in lf._LOCAL_STORE.get("p2_rounds_last", [])]
+    assert len(secs) == 3
+    assert secs[0] <= 130 and secs[1] <= 100 and secs[2] <= 70, secs
+    assert lf._LOCAL_STORE["p2_best_pace"] > 0
+    assert sim.attrs["transcript"][-1]["part"] == 2
+
+
+def test_finished_moves_to_next_round():
+    sim = Sim()
+    sim.intent("FluencyRoundsIntent")
+    sim.say(STORY, 10)
+    _, s = sim.intent("FinishedIntent")
+    assert "Round two" in s and "ninety seconds" in s
+
+
+def test_feedback_prompt_asks_for_two_fixes():
+    assert "two most valuable fixes" in feedback.SYSTEM_PROMPT
+    assert "three most valuable" not in feedback.SYSTEM_PROMPT
+
+
+def test_rule_based_gives_at_most_two_corrections():
+    llm._cache.clear()
+    with env(LLM_PROVIDER="none"):
+        transcript = [
+            {"part": 1, "q": "q", "a": "I am knowing it is very very good"},
+            {"part": 1, "q": "q", "a": "Very nice"},
+            {"part": 2, "q": "card", "a": "it was very good " * 10},
+        ]
+        text, used_ai = feedback.examiner_feedback(transcript)
+    llm._cache.clear()
+    markers = ["averaged", "Part 2 talk", "verbs like", "You said very",
+               "linking phrases"]
+    assert not used_ai
+    assert sum(m in text for m in markers) == 2, text
+
+
+def test_stative_progressive_tip():
+    def tip(answer):
+        return feedback.stative_progressive([{"part": 1, "a": answer}])
+    assert "I know" in tip("Honestly I am knowing the answer")
+    assert tip("She is understanding everything now")
+    assert tip("I am having lunch with friends") is None
+    assert tip("I am seeing a doctor tomorrow") is None
+
+
+def test_retry_target_choice():
+    overused = [{"part": 1, "q": "q", "a": "very good very nice very big"}]
+    t = feedback.retry_target(overused)
+    assert "extremely" in t["accept"] and "very" in t["say"]
+    few_linkers = [{"part": 1, "q": "q", "a": "I like it because it is fun"}]
+    assert feedback.retry_target(few_linkers)["accept"] == ["although"]
+    rich = [{"part": 1, "q": "q", "a": "although however for example "
+                                     "because on the other hand"}]
+    assert feedback.retry_target(rich)["accept"] == ["in my experience"]
+    t = feedback.retry_target(few_linkers)
+    assert feedback.uses_target("I love it, although it is noisy", t)
+    assert not feedback.uses_target("I love it a lot", t)
+
+
+def test_feedback_retry_flow_and_focus_reminder():
+    llm._cache.clear()
+    with env(LLM_PROVIDER="none"):
+        sim = Sim()
+        sim.intent("PartOneIntent")
+        for _ in range(6):
+            sim.say("I like it because it is fun")
+        _, s = sim.intent("FeedbackIntent")
+        assert "lock one in" in s and sim.attrs["mode"] == "retry"
+        _, s = sim.say("I like my city, although it is noisy")
+        assert "you used" in s and sim.attrs["mode"] == "menu"
+        assert lf._LOCAL_STORE["focus"]["accept"] == ["although"]
+        _, s = sim.intent("PartOneIntent")
+        assert "Remember to try" in s and "although" in s
+    llm._cache.clear()
+
+
+def test_retry_can_be_skipped_or_missed():
+    llm._cache.clear()
+    with env(LLM_PROVIDER="none"):
+        sim = Sim()
+        sim.intent("PartOneIntent")
+        for _ in range(6):
+            sim.say("I like it because it is fun")
+        sim.intent("FeedbackIntent")
+        _, s = sim.say("I like my city a lot")
+        assert "didn't use" in s
+        sim.intent("PartOneIntent")
+        for _ in range(6):
+            sim.say("I like it because it is fun")
+        sim.intent("FeedbackIntent")
+        _, s = sim.intent("AMAZON.NextIntent")
+        assert sim.attrs["mode"] == "menu" and "Skipping" in s
+    llm._cache.clear()
 
 
 if __name__ == "__main__":

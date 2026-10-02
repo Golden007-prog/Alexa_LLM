@@ -27,7 +27,7 @@ from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
                                               SpeakDirective)
 from ask_sdk_model.ui import SimpleCard
 
-from coach import feedback, listening, plan
+from coach import feedback, fluency, listening, plan
 from coach.content import CUE_CARDS, GERMAN_LESSONS, PART1_TOPICS
 from coach.speech import ACCENTS, brk, esc, german
 
@@ -40,7 +40,7 @@ SKILL_TITLE = "IELTS & German Coach"
 
 # Conversation modes kept in session attributes
 MENU, P1, P2, P3, LISTEN, GQUIZ = "menu", "p1", "p2", "p3", "listen", "gquiz"
-SETUP_EXAM, SETUP_CUE = "setup_exam", "setup_cue"
+SETUP_EXAM, SETUP_CUE, RETRY = "setup_exam", "setup_cue", "retry"
 YES_WORDS = {"yes", "yeah", "yep", "ok", "okay", "sure", "ready", "start",
              "let's go", "go", "yes please", "let's start", "continue",
              "go ahead", "i'm ready"}
@@ -195,6 +195,9 @@ def start_part1(h, mock):
                  + brk(0.5) + "Part 1. ")
     else:
         intro = "Part 1 practice. Answer in two or three sentences. "
+    focus = persist(h).get("focus")
+    if focus:
+        intro += "Remember to try %s today. " % esc(focus["say"])
     speech = "%sLet's talk about %s. %s" % (intro, esc(topic["topic"]), esc(q))
     return ask(h, speech, esc(q))
 
@@ -232,7 +235,9 @@ def cue_card_text(card):
         card["title"], ", ".join(card["points"]), card["explain"])
 
 
-def start_part2(h, prefix=""):
+def start_part2(h, prefix="", rounds=False):
+    """Part 2 long turn. rounds=True runs the fluency drill: the same talk
+    three times in 2:00, 1:30 and 1:00 (coach/fluency.py)."""
     mark_active(h)
     s = sess(h)
     used = s.setdefault("cards_used", [])
@@ -243,6 +248,12 @@ def start_part2(h, prefix=""):
     card = CUE_CARDS[idx]
     s["mode"] = P2
     s["p2"] = {"card": idx, "chunks": [], "first_ts": None, "first_words": 0}
+    if rounds:
+        s["mock"] = False
+        s["p2"].update({"round": 0, "rounds": [], "first_content": []})
+        prefix += ("Fluency rounds. You'll tell the same story three times: "
+                   "in two minutes, ninety seconds, then one minute. Keep the "
+                   "same details and get smoother each time. " + brk(0.5))
     points = ". ".join(esc(p) for p in card["points"])
     speech = (
         prefix + "Part 2. I'll give you a topic. You have one minute to prepare, "
@@ -266,6 +277,9 @@ def talk_seconds(h, p):
 def answer_part2(h, text, finished=False):
     s = sess(h)
     p = s["p2"]
+    rnd = p.get("round")
+    max_secs = P2_MAX_SECONDS if rnd is None else fluency.ROUND_SECONDS[rnd]
+    max_words = P2_MAX_WORDS * max_secs // P2_MAX_SECONDS
     if text:
         p["chunks"].append(text)
         if p["first_ts"] is None:
@@ -273,13 +287,15 @@ def answer_part2(h, text, finished=False):
             p["first_words"] = len(text.split())
     words = sum(len(c.split()) for c in p["chunks"])
     secs = talk_seconds(h, p) if p["first_ts"] is not None else 0
-    if not (finished or secs >= P2_MAX_SECONDS or words >= P2_MAX_WORDS):
+    if not (finished or secs >= max_secs or words >= max_words):
         first = len(p["chunks"]) == 1
         line = random.choice(GO_ON)
         if first:
             line = "Go on. Say I'm finished when you're done."
         return ask(h, line, "Carry on, or say I'm finished.")
     card = CUE_CARDS[p["card"]]
+    if rnd is not None:
+        return end_fluency_round(h, p, card, words, secs)
     add_transcript(h, {"part": 2, "q": card["title"], "a": " ".join(p["chunks"]),
                        "secs": int(secs)})
     if secs >= P2_MAX_SECONDS - 5:
@@ -296,6 +312,39 @@ def answer_part2(h, text, finished=False):
     return finish(h, msg, "Say part three for discussion questions on this "
                           "topic, or feedback.",
                   "Say part three, or feedback.")
+
+
+def end_fluency_round(h, p, card, words, secs):
+    s = sess(h)
+    rnd = p["round"]
+    talk = " ".join(p["chunks"])
+    p["rounds"].append({"words": words, "secs": int(secs)})
+    if rnd == 0:
+        p["first_content"] = fluency.content_words(talk)
+        add_transcript(h, {"part": 2, "q": card["title"], "a": talk,
+                           "secs": int(secs)})
+    if rnd + 1 < len(fluency.ROUND_SECONDS):
+        p.update({"round": rnd + 1, "chunks": [], "first_ts": None,
+                  "first_words": 0})
+        nxt = fluency.ROUND_SPOKEN[rnd + 1]
+        return ask(h, "Thank you. Round %s: tell me the same story again, with "
+                      "the same details, in %s. Go." % (
+                          fluency.ROUND_NAMES[rnd + 1], nxt),
+                   "Start round %s: the same story, in %s." % (
+                       fluency.ROUND_NAMES[rnd + 1], nxt))
+    text = fluency.summary(p["rounds"], p["first_content"],
+                           fluency.content_words(talk))
+    last_pace = fluency.pace(words, secs)
+    pers = persist(h)
+    pers["p2_rounds_last"] = p["rounds"]
+    pers["p2_best_pace"] = max(int(pers.get("p2_best_pace", 0)), last_pace)
+    save_persist(h)
+    s["last_card"] = p["card"]
+    s["mode"] = MENU
+    return finish(h, "Thank you. " + esc(text),
+                  "Say feedback to hear about your language, or part three "
+                  "for discussion questions.",
+                  "Say feedback, or part three.")
 
 
 def start_part3(h, prefix=""):
@@ -347,17 +396,50 @@ def give_feedback(h, prefix=""):
                                    "a few seconds.")
     text, used_ai = feedback.examiner_feedback(transcript,
                                                deadline=reply_deadline(h))
+    target = feedback.retry_target(transcript)
+    q = retry_question(transcript)
     s["transcript"] = []
-    s["mode"] = MENU
     p = persist(h)
     hist = p.setdefault("history", [])
     hist.append({"date": local_today(h).isoformat(),
                  "ai": used_ai, "feedback": text[:600]})
     del hist[:-10]
     save_persist(h)
-    return finish(h, ("" if sent else prefix) + esc(text) + brk(0.6),
-                  "Say repeat to hear that again, or mock test to go again.",
-                  "Say repeat, or mock test.", "Speaking feedback", text)
+    # Feedback ends with a retry: learners repair more when prompted to
+    # use the fix at once (docs/LEARNING_DESIGN.md 4.4).
+    s["mode"] = RETRY
+    s["retry"] = {"target": target, "q": q}
+    ask_again = "this time use %s. %s" % (esc(target["say"]), esc(q))
+    return ask(h, ("" if sent else prefix) + esc(text) + brk(0.6) +
+               "Let's lock one in. Answer this again, and " + ask_again,
+               "Answer again, and " + ask_again, "Speaking feedback", text)
+
+
+def retry_question(transcript):
+    for t in reversed(transcript):
+        if t.get("part") in (1, 3) and t.get("q"):
+            return t["q"]
+    return random.choice(random.choice(PART1_TOPICS)["questions"])
+
+
+def answer_retry(h, text, skipped=False):
+    s = sess(h)
+    target = (s.pop("retry", None) or {}).get("target")
+    s["mode"] = MENU
+    tail = ("Say mock test to go again, or menu.", "Say mock test, or menu.")
+    if skipped or not target:
+        return finish(h, "Okay. Skipping that one.", *tail)
+    p = persist(h)
+    p["focus"] = target          # reminded at the start of the next Part 1
+    save_persist(h)
+    label = esc(target.get("label") or target["say"])
+    if feedback.uses_target(text, target):
+        done = ("Nice, you used %s. That's the kind of language examiners "
+                "reward." % label)
+    else:
+        done = ("You didn't use %s that time. Try to fit it into your answers "
+                "today, and I'll remind you next time." % label)
+    return finish(h, done, *tail)
 
 
 # ---------------------------------------------------------------------------
@@ -507,12 +589,13 @@ ACTIVITIES = {
     "mock": ("a full mock test", 15, lambda h: start_part1(h, mock=True)),
     "p1": ("Part 1 questions with feedback", 5,
            lambda h: start_part1(h, mock=False)),
-    "p2": ("a Part 2 talk", 5, lambda h: _part2(h)),
+    "p2rounds": ("Part 2 fluency rounds", 7,
+                 lambda h: start_part2(h, rounds=True)),
     "listen": ("a listening call", 4, lambda h: start_listening(h)),
     "german": ("a German lesson", 6, lambda h: start_german(h)),
 }
 # Planned activities not built yet fall back to their nearest neighbour.
-PLAN_FALLBACK = {"p2rounds": "p2", "greview": "german"}
+PLAN_FALLBACK = {"greview": "german"}
 
 
 def resolve_plan(ids):
@@ -694,6 +777,12 @@ def progress(h):
     mocks = int(p.get("mocks", 0))
     lines.append("%d mock test%s done." % (mocks, "" if mocks == 1 else "s")
                  if mocks else "No full mock test yet.")
+    if p.get("p2_best_pace"):
+        lines.append("Best Part 2 pace: about %d words a minute, a rough "
+                     "figure." % int(p["p2_best_pace"]))
+    if p.get("focus"):
+        lines.append("Your focus: %s." % p["focus"].get("label",
+                                                         p["focus"]["say"]))
     lines.append("German lesson %d of %d is next." % (
         int(p.get("german_next", 0)) + 1, len(GERMAN_LESSONS)))
     if hist:
@@ -730,7 +819,7 @@ def route_answer(h, text):
     if cmd == "menu":
         return go_menu(h)
     if cmd == "finished":
-        return do_next(h) if mode in (P1, P3) else _finished(h)
+        return do_next(h) if mode in (P1, P3, RETRY) else _finished(h)
     if cmd == "next":
         return do_next(h)
     if mode == P1:
@@ -745,6 +834,8 @@ def route_answer(h, text):
         return answer_german(h, text)
     if mode in (SETUP_EXAM, SETUP_CUE):
         return setup_answer(h, text)
+    if mode == RETRY:
+        return answer_retry(h, text)
     if plan_pending(s) and norm in YES_WORDS:
         return start_next_planned(h)
     return ask(h, "Sorry, I didn't get that. " + MENU_SPEECH, MENU_SPEECH)
@@ -779,6 +870,8 @@ def do_next(h):
                                    "is on, then the date. ")
     if mode == SETUP_CUE:
         return finish_setup(h)
+    if mode == RETRY:
+        return answer_retry(h, "", skipped=True)
     if mode == MENU and plan_pending(s):
         return start_next_planned(h)
     if mode == P1:
@@ -843,7 +936,7 @@ def _fallback(h):
     mode = s.get("mode", MENU)
     if mode == P2:  # keep a long talk flowing even if a chunk wasn't understood
         return answer_part2(h, "")
-    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE):
+    if mode in (P1, P3, LISTEN, GQUIZ, SETUP_EXAM, SETUP_CUE, RETRY):
         return ask(h, "Sorry, I didn't catch that. " +
                    (s.get("last_reprompt") or ""),
                    s.get("last_reprompt") or MENU_SPEECH)
@@ -863,6 +956,8 @@ def _help(h):
                     "twenty-eighth, or say skip.",
         SETUP_CUE: "Tell me when and where you'll practise, like after "
                    "breakfast at my desk, or say skip.",
+        RETRY: "Answer the question again, using the phrase I suggested. "
+               "Say skip to move on.",
     }
     tip = tips.get(mode, "")
     return ask(h, (tip + " " if tip else "") + MENU_SPEECH + " You can also "
@@ -951,6 +1046,7 @@ def build_skill_builder():
         ("FinishedIntent", _finished),
         ("ListeningDrillIntent", _listening),
         ("GermanLessonIntent", lambda h: start_german(h, slot(h, "lesson"))),
+        ("FluencyRoundsIntent", lambda h: start_part2(h, rounds=True)),
         ("TodayIntent", offer_today),
         ("ProgressIntent", progress),
         ("SetExamDateIntent", set_exam_date),
