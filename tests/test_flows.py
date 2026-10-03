@@ -467,9 +467,12 @@ def test_s3_config_read_gives_up_quickly():
 
 
 def test_dynamodb_stall_does_not_hang_launch():
+    # AWS_DEFAULT_REGION: ask_sdk_dynamodb builds a boto3 resource as a default
+    # argument at import time, which needs a region. Lambda always has one.
     with black_hole() as port, env(
             DYNAMODB_PERSISTENCE_TABLE_NAME="coach-table",
             DYNAMODB_PERSISTENCE_REGION="us-east-1",
+            AWS_DEFAULT_REGION="us-east-1",
             AWS_ENDPOINT_URL_DYNAMODB="http://127.0.0.1:%d" % port,
             AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test"):
         sim = Sim(handler=lf.build_skill_builder().lambda_handler(),
