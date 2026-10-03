@@ -453,6 +453,24 @@ def test_interaction_models_match_handlers():
             assert s["type"].startswith("AMAZON.") or s["type"] in slot_types
 
 
+def test_interaction_model_follows_alexa_build_rules():
+    """Rules the Alexa model build enforces that the offline flows can't
+    see: no numerals in sample utterances (spell numbers as words), and
+    spelled-out letters written with periods ("t. h. o.")."""
+    lm = _model("en-IN")["interactionModel"]["languageModel"]
+    texts = [(i["name"], s) for i in lm["intents"] for s in i.get("samples", [])]
+    texts += [(t["name"], v["name"]["value"]) for t in lm.get("types", [])
+              for v in t["values"]]
+    texts += [(t["name"], syn) for t in lm.get("types", []) for v in t["values"]
+              for syn in v["name"].get("synonyms", [])]
+    for where, text in texts:
+        bare = re.sub(r"\{[^}]+\}", "", text)
+        assert not re.search(r"\d", bare), (where, text)
+        # a run of bare single letters is a spelling: "t h o r n"
+        assert not re.search(r"(?:^|\s)[a-z](?:\s[a-z])+(?=\s|$)", bare), \
+            (where, text)
+
+
 def test_s3_config_read_gives_up_quickly():
     llm._cache.clear()
     with black_hole() as port, env(
