@@ -21,6 +21,7 @@ from ask_sdk_core.api_client import DefaultApiClient
 from ask_sdk_core.dispatch_components import (AbstractExceptionHandler,
                                               AbstractRequestHandler,
                                               AbstractRequestInterceptor)
+from ask_sdk_core.exceptions import PersistenceException
 from ask_sdk_core.skill_builder import CustomSkillBuilder
 from ask_sdk_core.utils import get_slot, is_intent_name, is_request_type
 from ask_sdk_model.services.directive import (Header, SendDirectiveRequest,
@@ -58,8 +59,9 @@ WORDS_PER_SECOND = 2.1          # rough speaking rate for timing Part 2
 REPLY_BUDGET_SECONDS = 7.0
 ALEXA_API_TIMEOUT_SECONDS = 1.5
 
-MENU_SPEECH = ("You can say: mock test, part one, part two, part three, "
-               "listening drill, or German lesson.")
+MENU_SPEECH = ("You can say: today's plan, mock test, part one, two or three, "
+               "fluency rounds, listening drill, vocabulary drill, German "
+               "lesson, or German review. Or ask: how am I doing?")
 ACKS = ["", "Okay. ", "Thank you. ", "Right. ", "Alright. "]
 GO_ON = ["Mm-hm, go on.", "Okay, keep going.", "Yes, carry on.", "Go on.",
          "Mm-hm."]
@@ -77,11 +79,21 @@ _LOCAL_STORE = {}  # used only when no persistence adapter (local tests)
 
 def persist(h):
     """Persistent attributes (DynamoDB on Alexa-hosted), loaded once per
-    request and mutated in place."""
+    request and mutated in place. Numbers come back from DynamoDB as
+    Decimal, so arithmetic on them must not mix in floats."""
+    req = h.attributes_manager.request_attributes
+    if "persist_fallback" in req:
+        return req["persist_fallback"]
     try:
         return h.attributes_manager.persistent_attributes
+    except PersistenceException as exc:
+        # DynamoDB failed. Don't retry within this request (each try can cost
+        # a second of the reply window) and don't treat the user as new.
+        logger.warning("Progress not loaded, continuing without it: %s", exc)
+        req["persist_fallback"] = {"setup_done": True, "visits": 1}
+        return req["persist_fallback"]
     except Exception:
-        return _LOCAL_STORE
+        return _LOCAL_STORE   # no persistence adapter: local tests
 
 
 def save_persist(h):
@@ -114,8 +126,13 @@ def local_today(h):
     return plan.local_date(request_time(h), h.request_envelope.request.locale)
 
 
-def mark_active(h):
-    """Log today as a practice day (for the streak); saved once per day."""
+def begin_activity(h):
+    """Every activity start: drop an offered plan the user passed over (so a
+    later "yes" can't start it), and log today as a practice day for the
+    streak, saved once per day."""
+    s = sess(h)
+    if s.get("plan") and not plan_active(s):
+        s.pop("plan")
     p = persist(h)
     days = p.get("days") or []
     updated = plan.record_day(days, local_today(h))
@@ -185,7 +202,7 @@ def p1_question(s):
 
 
 def start_part1(h, mock):
-    mark_active(h)
+    begin_activity(h)
     s = sess(h)
     s["mock"] = mock
     s["mode"] = P1
@@ -243,7 +260,7 @@ def cue_card_text(card):
 def start_part2(h, prefix="", rounds=False):
     """Part 2 long turn. rounds=True runs the fluency drill: the same talk
     three times in 2:00, 1:30 and 1:00 (coach/fluency.py)."""
-    mark_active(h)
+    begin_activity(h)
     s = sess(h)
     used = s.setdefault("cards_used", [])
     choices = [i for i in range(len(CUE_CARDS)) if i not in used] or \
@@ -353,7 +370,7 @@ def end_fluency_round(h, p, card, words, secs):
 
 
 def start_part3(h, prefix=""):
-    mark_active(h)
+    begin_activity(h)
     s = sess(h)
     idx = s.get("last_card")
     intro = "Part 3. Let's discuss some more general questions linked to "
@@ -458,7 +475,8 @@ MIN_ATTEMPTS_FOR_WEAK_SPOT = 3
 
 def weakest_listening(stats):
     """The item kind with the lowest accuracy (enough attempts), or None."""
-    rated = [(c / float(c + w), kind) for kind, (c, w) in (stats or {}).items()
+    rated = [(float(c) / float(c + w), kind)       # c, w may be Decimal
+             for kind, (c, w) in (stats or {}).items()
              if c + w >= MIN_ATTEMPTS_FOR_WEAK_SPOT]
     if not rated:
         return None
@@ -473,7 +491,7 @@ def listen_question(item):
 
 
 def start_listening(h, accent=None):
-    mark_active(h)
+    begin_activity(h)
     s, p = sess(h), persist(h)
     drill = listening.make_drill(
         accent, recent=p.get("accents"),
@@ -530,7 +548,7 @@ def lesson_phrases(idx):
 
 
 def start_german(h, number=None, prefix=""):
-    mark_active(h)
+    begin_activity(h)
     s = sess(h)
     p = persist(h)
     nxt = int(p.get("german_next", 0))
@@ -650,16 +668,23 @@ def asked_before(state):
 
 
 def start_vocab(h):
-    mark_active(h)
-    s = sess(h)
-    queue = srs.pick(srs_store(h), [it["id"] for it in vocab.ITEMS],
-                     local_today(h), VOCAB_PER_ROUND, cap=exam_cap(h))
+    begin_activity(h)
+    s, store = sess(h), srs_store(h)
+    ids = [it["id"] for it in vocab.ITEMS]
+    queue = srs.pick(store, ids, local_today(h), VOCAB_PER_ROUND,
+                     cap=exam_cap(h))
+    lead = ""
+    if not queue:   # every item seen and none due: refresh the shakiest
+        queue = sorted(ids, key=lambda i: (store[i][3], store[i][2]))[
+            :VOCAB_PER_ROUND]
+        lead = "Nothing is due today, so here are five to keep them fresh. "
     s["mode"] = VOCAB
     s["vocab"] = {"queue": queue, "i": 0, "score": 0, "again": []}
     item = vocab.BY_ID[queue[0]]
-    return ask(h, "Vocabulary drill. I'll say a plain sentence. Say it again "
+    return ask(h, "Vocabulary drill. %sI'll say a plain sentence. Say it again "
                   "with a stronger word, the kind that lifts your vocabulary "
-                  "score. %s Number one: %s" % (brk(0.4), esc(item["plain"])),
+                  "score. %s Number one: %s" % (lead, brk(0.4),
+                                                esc(item["plain"])),
                "Make this stronger: " + esc(item["plain"]))
 
 
@@ -706,7 +731,7 @@ NUMBERS = ["one", "two", "three", "four", "five", "six", "seven", "eight",
 
 
 def start_german_review(h):
-    mark_active(h)
+    begin_activity(h)
     store = srs_store(h)
     taught = [pid for pid in GERMAN_IDS if pid in store]
     if not taught:
@@ -870,6 +895,13 @@ def offer_today(h, prefix=""):
         p["plan_date"] = today.isoformat()
         save_persist(h)
     left = plan.days_left(today, p.get("exam_date"))
+    if p.get("plan_done_date") == today.isoformat():
+        s["mode"] = MENU
+        s.pop("plan", None)
+        return ask(h, prefix + countdown_line(left) + "You've already "
+                   "finished today's plan. Nice work. For extra practice, say "
+                   "fluency rounds, listening drill, vocabulary drill, or "
+                   "German review.", MENU_SPEECH)
     items = resolve_plan(plan.todays_plan(left, int(p.get("plan_day", 0))))
     s["plan"] = {"items": items, "i": 0, "active": False}
     s["mode"] = MENU
@@ -906,6 +938,8 @@ def finish(h, done, tail, reprompt, card_title=None, card_text=None):
                       "ready, or menu to stop." % (done, brk(0.4), label),
                    "Say next for %s, or menu." % label, card_title, card_text)
     s.pop("plan", None)
+    persist(h)["plan_done_date"] = local_today(h).isoformat()
+    save_persist(h)
     return ask(h, "%s %s That's today's plan done. Nice work, see you "
                   "tomorrow. Say menu if you want more practice, or stop."
                % (done, brk(0.4)), MENU_SPEECH, card_title, card_text)
@@ -1051,7 +1085,11 @@ def route_answer(h, text):
     if cmd == "menu":
         return go_menu(h)
     if cmd == "finished":
-        return do_next(h) if mode in (P1, P3, RETRY) else _finished(h)
+        if mode in (P1, P3, RETRY, SETUP_EXAM, SETUP_CUE):
+            return do_next(h)
+        if mode in (LISTEN, GQUIZ, VOCAB, GSAY, GSELF):
+            return go_menu(h, "Okay, stopping there. ")
+        return _finished(h)
     if cmd == "next":
         return do_next(h)
     if mode == P1:
@@ -1079,11 +1117,11 @@ def route_answer(h, text):
     return ask(h, "Sorry, I didn't get that. " + MENU_SPEECH, MENU_SPEECH)
 
 
-def go_menu(h):
+def go_menu(h, prefix=""):
     s = sess(h)
     s["mode"] = MENU
     s.pop("plan", None)   # leaving the menu way means leaving today's plan
-    return ask(h, "Main menu. " + MENU_SPEECH, MENU_SPEECH)
+    return ask(h, prefix + "Main menu. " + MENU_SPEECH, MENU_SPEECH)
 
 
 def do_repeat(h):
@@ -1294,7 +1332,8 @@ def build_skill_builder():
         ("PartTwoIntent", _part2),
         ("PartThreeIntent", _part3),
         ("FeedbackIntent", give_feedback),
-        ("FinishedIntent", _finished),
+        # same routing as "I'm finished" said inside a free-form answer
+        ("FinishedIntent", lambda h: route_answer(h, "i'm finished")),
         ("ListeningDrillIntent", _listening),
         ("GermanLessonIntent", lambda h: start_german(h, slot(h, "lesson"))),
         ("FluencyRoundsIntent", lambda h: start_part2(h, rounds=True)),

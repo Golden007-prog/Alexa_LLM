@@ -35,8 +35,9 @@ def due_date(entry, cap=None):
 
 
 def _wrong_rate(entry):
-    total = entry[0] + entry[1]
-    return entry[1] / float(total) if total else 0.0
+    # DynamoDB returns Decimal; Decimal / float raises, so convert both.
+    total = float(entry[0]) + float(entry[1])
+    return float(entry[1]) / total if total else 0.0
 
 
 def pick(store, candidates, today, n, cap=None, new_ok=True):

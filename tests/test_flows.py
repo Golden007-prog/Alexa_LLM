@@ -472,11 +472,14 @@ def test_dynamodb_stall_does_not_hang_launch():
             DYNAMODB_PERSISTENCE_REGION="us-east-1",
             AWS_ENDPOINT_URL_DYNAMODB="http://127.0.0.1:%d" % port,
             AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test"):
-        sim = Sim(handler=lf.build_skill_builder().lambda_handler())
+        sim = Sim(handler=lf.build_skill_builder().lambda_handler(),
+                  fresh=True)
         done, secs, result = run_within(10, sim.launch)
     assert done, "launch still blocked after 10 s"
-    assert secs < 4.5, "launch took %.1f s" % secs
-    assert "mock test" in result[1]
+    # one failed load per request, not one per persist() call
+    assert secs < 2.5, "launch took %.1f s" % secs
+    # can't load progress: treat as a returning user, don't re-run setup
+    assert "Today:" in result[1] and "when is your" not in result[1]
 
 
 def test_llm_timeout_capped_at_5_5_seconds():
@@ -591,6 +594,8 @@ def test_declined_plan_does_not_hijack_other_activities():
     for _ in sim.attrs["listen"]["items"]:
         _, s = sim.say("I don't know")
     assert "Next on today's plan" not in s and "Say listening drill" in s
+    sim.say("yes")                                 # must not start the old plan
+    assert sim.attrs["mode"] == "menu" and "plan" not in sim.attrs
 
 
 def test_setup_can_be_skipped():
@@ -1091,6 +1096,71 @@ def test_progress_reports_german_due():
         "L1P3": [1, 0, "2026-10-04", 1], "V01": [1, 0, "2026-10-01", 1]}})
     _, s = sim.intent("ProgressIntent")
     assert "2 German phrases are due for review" in s
+
+
+# ---------------------------------------------------------------------------
+# Regressions from code review
+# ---------------------------------------------------------------------------
+def test_dynamodb_decimals_do_not_crash():
+    """boto3 hands numbers back as Decimal; Decimal / float raises."""
+    from decimal import Decimal as Dec
+    store = {"visits": Dec(5), "mocks": Dec(2), "german_next": Dec(1),
+             "plan_day": Dec(3), "p2_best_pace": Dec(120),
+             "listen_stats": {"surname": [Dec(1), Dec(4)],
+                              "digits": [Dec(3), Dec(0)]},
+             "srs": {"V01": [Dec(1), Dec(1), "2026-10-01", Dec(1)],
+                     "L1P1": [Dec(3), Dec(0), "2026-09-20", Dec(3)]}}
+    for intent, mode in [("VocabDrillIntent", "vocab"),
+                         ("ListeningDrillIntent", "listen"),
+                         ("GermanReviewIntent", "gsay")]:
+        sim = Sim(store=store)
+        _, s = sim.intent(intent)
+        assert sim.attrs.get("mode") == mode, (intent, s)
+    _, s = Sim(store=store).intent("ProgressIntent")
+    assert "spelling names" in s
+    _, s = Sim(store=store).launch()
+    assert "Today:" in s
+
+
+def test_vocab_with_nothing_due_still_runs():
+    every = {it["id"]: [1, 0, "2026-10-04", 1] for it in vocab.ITEMS}
+    sim = Sim(store={"srs": every})
+    _, s = sim.intent("VocabDrillIntent")
+    assert "Nothing is due" in s and sim.attrs["mode"] == "vocab"
+    assert len(sim.attrs["vocab"]["queue"]) == 5
+
+
+def test_finished_intent_leaves_retry_and_quizzes():
+    llm._cache.clear()
+    with env(LLM_PROVIDER="none"):
+        sim = Sim()
+        sim.intent("PartOneIntent")
+        for _ in range(6):
+            sim.say("I like it because it is fun")
+        sim.intent("FeedbackIntent")
+        assert sim.attrs["mode"] == "retry"
+        _, s = sim.intent("FinishedIntent")
+        assert sim.attrs["mode"] == "menu" and "Skipping" in s
+    llm._cache.clear()
+    sim = Sim()
+    sim.intent("GermanLessonIntent")
+    sim.intent("FinishedIntent")
+    assert sim.attrs["mode"] == "menu"
+
+
+def test_completed_plan_not_offered_again_same_day():
+    sim = Sim(store={"exam_date": "2026-10-04"})       # exam day: ["p1"]
+    sim.launch()
+    sim.say("yes")
+    for _ in range(6):
+        _, s = sim.say("I live in Bengaluru because my job is here")
+    for _ in range(3):
+        if "today's plan done" in s:
+            break
+        _, s = sim.intent("AMAZON.NextIntent")
+    assert "today's plan done" in s
+    _, s = sim.launch()
+    assert "already finished today's plan" in s and "Today:" not in s
 
 
 if __name__ == "__main__":
