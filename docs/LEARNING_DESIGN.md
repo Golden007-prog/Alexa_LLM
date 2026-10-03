@@ -2,6 +2,8 @@
 
 This document turns learning research into concrete features for the IELTS & German Coach. It was written on 3 October 2026 for one learner: an IELTS exam (Speaking and Listening) less than four weeks away, plus German from zero to A1. Every technique below is mapped to a voice flow, the state it needs, and what the skill can honestly check, given that an Alexa skill receives speech-recognition **text** and never audio.
 
+**Status:** every feature in §4 was built in Phase 3, in the order in §7, with tests (see `tests/test_flows.py`).
+
 Evidence is marked by how well it was verified. **High** means the source was read directly (abstract or full text) with numbers confirmed. **Medium** means confirmed through a secondary summary. **Low** means unverified, or my own inference from the evidence; those are labelled so they never read as findings.
 
 ## 1. The short version

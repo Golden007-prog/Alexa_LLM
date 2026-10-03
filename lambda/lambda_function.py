@@ -34,6 +34,9 @@ from coach.speech import ACCENTS, brk, esc, german
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+# Lambda's root logger is at WARNING; let coach.* INFO lines (LLM config,
+# progressive response) reach CloudWatch too.
+logging.getLogger("coach").setLevel(logging.INFO)
 # Alexa-hosted pins the runtime; log it so CloudWatch shows what really runs.
 logger.info("Cold start on Python %s", sys.version.split()[0])
 

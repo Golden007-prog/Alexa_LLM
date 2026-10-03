@@ -1101,6 +1101,13 @@ def test_progress_reports_german_due():
 # ---------------------------------------------------------------------------
 # Regressions from code review
 # ---------------------------------------------------------------------------
+def test_coach_info_logs_reach_cloudwatch():
+    """Lambda's root logger sits at WARNING; the troubleshooting guide relies
+    on coach.llm's INFO lines (e.g. 'No S3 LLM config')."""
+    import logging
+    assert logging.getLogger("coach.llm").getEffectiveLevel() <= logging.INFO
+
+
 def test_dynamodb_decimals_do_not_crash():
     """boto3 hands numbers back as Decimal; Decimal / float raises."""
     from decimal import Decimal as Dec
