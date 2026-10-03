@@ -10,7 +10,7 @@ Pick one path. Path A is a one-time import through the browser. Path B uses the 
 2. **Name:** `IELTS and German Coach`. **Primary locale:** English (IN). Click **Next**.
 3. **Experience:** Other → **Custom**. **Hosting:** **Alexa-hosted (Python)**. **Hosting region:** whichever of the three offered is closest to you; for India that's EU (Ireland). Click **Next**.
 4. **Templates:** choose **Import skill**, paste `https://github.com/Golden007-prog/Alexa_LLM.git`, and click **Import**. The repo must be public; it is. Amazon's guide: [Import a skill from a Git repository](https://developer.amazon.com/en-US/docs/alexa/hosted-skills/alexa-hosted-skills-git-import.html).
-5. When the skill opens: **Build** tab → **Build skill**, and wait for "Build successful". The en-US and en-GB models build too.
+5. **Set the invocation name.** The import resets it to `change me`, and only creates the primary locale (English (IN)), which is all your Echo needs. Go to **Build** tab → **Invocations** → **Skill Invocation Name**, type `study coach`, then **Save** → **Build skill**, and wait for "Build successful". This was observed on 3 Oct 2026: the repo's model says "study coach", but the import replaced it.
 6. **Test** tab → set "Skill testing is enabled in" to **Development**. Type `open study coach` to check that it answers.
 7. Say to your Echo Dot: **"Alexa, open study coach."** Then follow [DEVICE_TEST_SCRIPT.md](DEVICE_TEST_SCRIPT.md).
 
