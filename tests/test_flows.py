@@ -568,6 +568,43 @@ def test_parse_exam_date():
         assert plan.parse_exam_date(text, today) is None, text
 
 
+def test_parse_exam_date_leap_day_next_year():
+    today = date(2027, 10, 4)
+    for text in ("february twenty ninth", "the twenty ninth of february",
+                 "February 29th", "the 29th of February"):
+        assert plan.parse_exam_date(text, today) == date(2028, 2, 29), text
+
+
+def test_parse_exam_date_leap_day_current_year_and_same_day():
+    for today in (date(2028, 1, 1), date(2028, 2, 29)):
+        for text in ("february twenty ninth", "February 29th"):
+            assert plan.parse_exam_date(text, today) == date(2028, 2, 29), \
+                (text, today)
+
+
+def test_parse_exam_date_leap_day_horizon_boundary():
+    want = date(2028, 2, 29)
+    allowed = date(2027, 1, 25)
+    too_early = date(2027, 1, 24)
+    assert (want - allowed).days == plan.MAX_DAYS_AHEAD == 400
+    assert (want - too_early).days == 401
+    for text in ("february twenty ninth", "February 29th"):
+        assert plan.parse_exam_date(text, allowed) == want, text
+        assert plan.parse_exam_date(text, too_early) is None, text
+
+
+def test_parse_exam_date_leap_day_outside_horizon():
+    for today in (date(2026, 10, 4), date(2028, 3, 1), date(2029, 10, 4)):
+        for text in ("february twenty ninth", "February 29th"):
+            assert plan.parse_exam_date(text, today) is None, (text, today)
+
+
+def test_parse_exam_date_february_thirtieth_is_invalid():
+    for today in (date(2027, 10, 4), date(2028, 1, 1)):
+        for text in ("february thirtieth", "February 30th"):
+            assert plan.parse_exam_date(text, today) is None, (text, today)
+
+
 def test_streak_and_day_log():
     days = []
     for d in ("2026-10-01", "2026-10-02", "2026-10-03", "2026-10-03"):
