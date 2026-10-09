@@ -77,7 +77,7 @@ def _next_occurrence(month, day, today):
         try:
             d = date(year, month, day)
         except ValueError:
-            return None
+            continue
         if d >= today:
             return d
     return None

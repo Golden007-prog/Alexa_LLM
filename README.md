@@ -25,6 +25,8 @@ Start with **"Alexa, open study coach"**. You can also ask in one go: "Alexa, as
 | "how am I doing" | Countdown, streak, mock tests, best Part 2 pace, focus phrase, weakest listening item, German lesson and phrases due. |
 | "repeat" · "next" / "skip" · "help" · "menu" · "stop" | Work everywhere. |
 
+Exam dates must be within the next 400 days. A spoken date without a year uses its next valid occurrence, including February 29 in an upcoming leap year when it falls within that window.
+
 ## Architecture
 
 ```mermaid
@@ -84,7 +86,7 @@ python -m pytest                       # or: python tests/test_flows.py
 vermin "-t=3.8-" --no-tips --violations lambda
 ```
 
-The 67 tests feed real request envelopes through the handler. They check:
+The 73 tests cover helper behavior and feed real request envelopes through the handler. They check:
 - every response stays under Alexa's limits: SSML of 8,000 characters or fewer, well-formed XML, breaks of 10 s or less, and estimated audio within 240 s (90 s for reprompts);
 - no voice name is ever spoken;
 - the interaction models match the handlers;
